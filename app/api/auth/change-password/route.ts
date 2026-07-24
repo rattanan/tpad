@@ -1,0 +1,13 @@
+import { randomUUID } from "node:crypto";
+import { desc, eq } from "drizzle-orm";
+import type { NextRequest } from "next/server";
+import { db } from "@/lib/db";
+import { passwordHistory, users } from "@/lib/db/schema";
+import { apiError, HttpError } from "@/lib/http";
+import { writeAudit } from "@/lib/auth/audit";
+import { hashPassword, validatePassword, verifyPassword } from "@/lib/auth/password";
+import { getRequestMeta, isSameOrigin } from "@/lib/auth/request";
+import { requireSession, revokeUserSessions } from "@/lib/auth/session";
+import { changePasswordSchema } from "@/lib/auth/validation";
+
+export async function POST(request: NextRequest) { const meta = getRequestMeta(request); try { if (!isSameOrigin(request)) throw new HttpError(403, "Invalid request origin", "CSRF_REJECTED"); const session = await requireSession(request); const input = changePasswordSchema.parse(await request.json()); const user = (await db.select().from(users).where(eq(users.id, session.user.id)).limit(1))[0]; if (!user) throw new HttpError(404, "User not found"); if (!user.mustChangePassword && (!input.currentPassword || !(await verifyPassword(input.currentPassword, user.passwordHash)))) throw new HttpError(400, "Current password is incorrect", "INVALID_CURRENT_PASSWORD"); const errors = validatePassword(input.newPassword, user); if (errors.length) throw new HttpError(400, errors[0], "PASSWORD_POLICY"); if (await verifyPassword(input.newPassword, user.passwordHash)) throw new HttpError(400, "New password cannot be the same as the current password", "PASSWORD_REUSED"); const history = await db.select({ passwordHash: passwordHistory.passwordHash }).from(passwordHistory).where(eq(passwordHistory.userId, user.id)).orderBy(desc(passwordHistory.createdAt)).limit(5); for (const previous of history) if (await verifyPassword(input.newPassword, previous.passwordHash)) throw new HttpError(400, "A recently used password cannot be reused", "PASSWORD_REUSED"); const now = new Date(); const passwordHash = await hashPassword(input.newPassword); await db.update(users).set({ passwordHash, mustChangePassword: false, passwordChangedAt: now, updatedAt: now }).where(eq(users.id, user.id)); await db.insert(passwordHistory).values({ id: randomUUID(), userId: user.id, passwordHash, createdAt: now }); await revokeUserSessions(user.id, session.sessionId); await writeAudit({ actor: session.user, action: "PASSWORD_CHANGED", category: "SECURITY", targetType: "USER", targetId: user.id, targetName: user.email, newValues: { password: "[REDACTED]", mustChangePassword: false }, meta }); return Response.json({ success: true }); } catch (error) { return apiError(error, meta.requestId); } }

@@ -1,30 +1,22 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import Link from "next/link";
 
-type UserStatus = "Active" | "Inactive" | "Locked";
-type Role = "Administrator" | "Dashboard Creator" | "Data Source Creator" | "Viewer";
+type UserStatus = "ACTIVE" | "INACTIVE" | "LOCKED" | "ARCHIVED";
+type Role = "ADMIN" | "DASHBOARD_CREATOR" | "DATA_SOURCE_CREATOR" | "VIEWER";
 
 type User = {
-  id: number;
-  name: string;
+  id: string;
+  fullName: string;
+  username: string;
   email: string;
-  initials: string;
   role: Role;
   status: UserStatus;
-  lastLogin: string;
-  created: string;
-  creator: string;
+  lastLoginAt: string | null;
+  createdAt: string;
+  createdBy: string | null;
 };
-
-const users: User[] = [
-  { id: 1, name: "Nattapong Saengsuwan", email: "nattapong@acme.io", initials: "NS", role: "Administrator", status: "Active", lastLogin: "Today, 09:41", created: "15 Jan 2025", creator: "System" },
-  { id: 2, name: "Pimchanok Rattanakul", email: "pimchanok@acme.io", initials: "PR", role: "Dashboard Creator", status: "Active", lastLogin: "Today, 08:24", created: "09 Feb 2025", creator: "Nattapong S." },
-  { id: 3, name: "Kritsada Wongsiri", email: "kritsada@acme.io", initials: "KW", role: "Data Source Creator", status: "Active", lastLogin: "Yesterday, 16:18", created: "28 Feb 2025", creator: "Nattapong S." },
-  { id: 4, name: "Arisa Charoen", email: "arisa@acme.io", initials: "AC", role: "Viewer", status: "Inactive", lastLogin: "12 Mar 2025", created: "03 Mar 2025", creator: "Pimchanok R." },
-  { id: 5, name: "Thanawat P.", email: "thanawat@acme.io", initials: "TP", role: "Viewer", status: "Locked", lastLogin: "08 Mar 2025", created: "05 Mar 2025", creator: "Nattapong S." },
-  { id: 6, name: "Sirinapa Boonsri", email: "sirinapa@acme.io", initials: "SB", role: "Dashboard Creator", status: "Active", lastLogin: "04 Mar 2025", created: "18 Feb 2025", creator: "Nattapong S." },
-];
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const paths: Record<string, React.ReactNode> = {
@@ -48,8 +40,10 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
 }
 
 const roleClass: Record<Role, string> = {
-  Administrator: "role-admin", "Dashboard Creator": "role-creator", "Data Source Creator": "role-data", Viewer: "role-viewer",
+  ADMIN: "role-admin", DASHBOARD_CREATOR: "role-creator", DATA_SOURCE_CREATOR: "role-data", VIEWER: "role-viewer",
 };
+const roleLabel: Record<Role, string> = { ADMIN: "Administrator", DASHBOARD_CREATOR: "Dashboard Creator", DATA_SOURCE_CREATOR: "Data Source Creator", VIEWER: "Viewer" };
+const formatDate = (value: string | null) => value ? new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "Never";
 
 export default function Home() {
   const [query, setQuery] = useState("");
@@ -57,11 +51,15 @@ export default function Home() {
   const [status, setStatus] = useState("All status");
   const [showAdd, setShowAdd] = useState(false);
   const [notice, setNotice] = useState("");
-  const filtered = useMemo(() => users.filter((user) =>
-    (role === "All roles" || user.role === role) && (status === "All status" || user.status === status) &&
-    `${user.name} ${user.email}`.toLowerCase().includes(query.toLowerCase())), [query, role, status]);
-
+  const [users, setUsers] = useState<User[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
   const showNotice = (message: string) => { setNotice(message); window.setTimeout(() => setNotice(""), 2600); };
+  const loadUsers = async () => { setLoading(true); const params = new URLSearchParams({ pageSize: "50" }); if (query) params.set("q", query); if (role !== "All roles") params.set("role", role); if (status !== "All status") params.set("status", status); const response = await fetch(`/api/admin/users?${params}`); const body = await response.json(); if (response.ok) { setUsers(body.items); setTotal(body.total); } else showNotice(body.error || "Unable to load users"); setLoading(false); };
+  useEffect(() => { const timer = window.setTimeout(() => { void loadUsers(); }, 250); return () => window.clearTimeout(timer); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, role, status]);
+  async function create(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const data = new FormData(event.currentTarget); const response = await fetch("/api/admin/users", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fullName: data.get("fullName"), username: data.get("username"), email: data.get("email"), role: data.get("role"), status: "ACTIVE", password: data.get("password"), mustChangePassword: data.get("mustChangePassword") === "on" }) }); const body = await response.json(); if (!response.ok) return showNotice(body.error || "Unable to create user"); setShowAdd(false); showNotice("User created successfully"); await loadUsers(); }
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -71,8 +69,8 @@ export default function Home() {
           <p className="nav-label">WORKSPACE</p>
           <a><Icon name="grid" />Overview</a><a><Icon name="layout" />Dashboards</a><a><Icon name="database" />Data sources</a>
           <p className="nav-label nav-gap">ADMINISTRATION</p>
-          <a className="active"><Icon name="users" />User management<span className="nav-count">24</span></a>
-          <a><Icon name="shield" />Roles & permissions</a><a><Icon name="activity" />Audit logs</a><a><Icon name="settings" />Settings</a>
+          <Link className="active" href="/admin/users"><Icon name="users" />User management<span className="nav-count">{total}</span></Link>
+          <a><Icon name="shield" />Roles & permissions</a><Link href="/admin/audit-logs"><Icon name="activity" />Audit logs</Link><a><Icon name="settings" />Settings</a>
         </nav>
         <div className="sidebar-bottom"><div className="help-card"><span className="help-symbol">?</span><div><strong>Need help?</strong><span>Visit help center</span></div><Icon name="arrow" size={15} /></div><div className="account"><span className="avatar avatar-dark">NS</span><div><strong>Nattapong S.</strong><small>Administrator</small></div><Icon name="more" /></div></div>
       </aside>
@@ -80,14 +78,14 @@ export default function Home() {
         <header className="topbar"><div className="crumbs"><span>Administration</span><b>/</b><strong>User management</strong></div><div className="top-actions"><button className="icon-button"><Icon name="search" /></button><button className="icon-button notification"><Icon name="bell" /><i /></button><span className="top-avatar">NS</span></div></header>
         <div className="page-body">
           <div className="title-row"><div><p className="eyebrow">ADMINISTRATION</p><h1>User management</h1><p className="intro">Manage your team members, roles, and account access.</p></div><button className="primary-button" onClick={() => setShowAdd(true)}><Icon name="plus" />Add user</button></div>
-          <div className="metrics"><div><span className="metric-icon blue"><Icon name="users" /></span><p>Total users</p><strong>24</strong><small><em>+3</em> this month</small></div><div><span className="metric-icon green"><Icon name="shield" /></span><p>Active users</p><strong>21</strong><small>87.5% of total</small></div><div><span className="metric-icon amber"><Icon name="activity" /></span><p>Pending invite</p><strong>2</strong><small>Expires in 7 days</small></div><div><span className="metric-icon red"><Icon name="shield" /></span><p>Locked accounts</p><strong>1</strong><small>Requires attention</small></div></div>
-          <section className="table-card"><div className="table-toolbar"><div className="search-field"><Icon name="search" size={17} /><input aria-label="Search users" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search by name or email..." /></div><div className="filters"><label><select value={role} onChange={(e) => setRole(e.target.value)}><option>All roles</option><option>Administrator</option><option>Dashboard Creator</option><option>Data Source Creator</option><option>Viewer</option></select><Icon name="chevron" size={14} /></label><label><select value={status} onChange={(e) => setStatus(e.target.value)}><option>All status</option><option>Active</option><option>Inactive</option><option>Locked</option></select><Icon name="chevron" size={14} /></label><button className="filter-button"><Icon name="filter" size={16} />Filters</button></div></div>
-            <div className="table-wrap"><table><thead><tr><th>User <span className="sort">↕</span></th><th>Role <span className="sort">↕</span></th><th>Status</th><th>Last login <span className="sort">↕</span></th><th>Created <span className="sort">↕</span></th><th>Created by</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{filtered.map((user) => <tr key={user.id}><td><div className="person"><span className={`avatar avatar-${user.id}`}>{user.initials}</span><span><strong>{user.name}</strong><small>{user.email}</small></span></div></td><td><span className={`role-badge ${roleClass[user.role]}`}>{user.role}</span></td><td><span className={`status ${user.status.toLowerCase()}`}><i />{user.status}</span></td><td className="date">{user.lastLogin}</td><td className="date">{user.created}</td><td className="creator">{user.creator}</td><td><button className="more-button" aria-label={`Actions for ${user.name}`} onClick={() => showNotice(`Actions opened for ${user.name}`)}><Icon name="more" size={19} /></button></td></tr>)}</tbody></table>{filtered.length === 0 && <div className="empty">No users match your filters.</div>}</div>
-            <div className="table-footer"><span>Showing <strong>{filtered.length}</strong> of <strong>24</strong> users</span><div className="pagination"><button disabled>‹</button><button className="current">1</button><button>2</button><button>3</button><button>›</button></div></div>
+          <div className="metrics"><div><span className="metric-icon blue"><Icon name="users" /></span><p>Total users</p><strong>{total}</strong><small>All managed accounts</small></div><div><span className="metric-icon green"><Icon name="shield" /></span><p>Active users</p><strong>{users.filter(u => u.status === "ACTIVE").length}</strong><small>Current result set</small></div><div><span className="metric-icon amber"><Icon name="activity" /></span><p>Must change password</p><strong>—</strong><small>Security policy enabled</small></div><div><span className="metric-icon red"><Icon name="shield" /></span><p>Locked accounts</p><strong>{users.filter(u => u.status === "LOCKED").length}</strong><small>Requires attention</small></div></div>
+          <section className="table-card"><div className="table-toolbar"><div className="search-field"><Icon name="search" size={17} /><input aria-label="Search users" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search by name or email..." /></div><div className="filters"><label><select value={role} onChange={(e) => setRole(e.target.value)}><option>All roles</option><option value="ADMIN">Administrator</option><option value="DASHBOARD_CREATOR">Dashboard Creator</option><option value="DATA_SOURCE_CREATOR">Data Source Creator</option><option value="VIEWER">Viewer</option></select><Icon name="chevron" size={14} /></label><label><select value={status} onChange={(e) => setStatus(e.target.value)}><option>All status</option><option value="ACTIVE">Active</option><option value="INACTIVE">Inactive</option><option value="LOCKED">Locked</option><option value="ARCHIVED">Archived</option></select><Icon name="chevron" size={14} /></label><button className="filter-button"><Icon name="filter" size={16} />Filters</button></div></div>
+            <div className="table-wrap"><table><thead><tr><th>User <span className="sort">↕</span></th><th>Role <span className="sort">↕</span></th><th>Status</th><th>Last login <span className="sort">↕</span></th><th>Created <span className="sort">↕</span></th><th>Created by</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{users.map((user, index) => <tr key={user.id}><td><div className="person"><span className={`avatar avatar-${(index % 6) + 1}`}>{user.fullName.split(" ").map(part => part[0]).join("").slice(0, 2)}</span><span><strong>{user.fullName}</strong><small>@{user.username} · {user.email}</small></span></div></td><td><span className={`role-badge ${roleClass[user.role]}`}>{roleLabel[user.role]}</span></td><td><span className={`status ${user.status.toLowerCase()}`}><i />{user.status[0] + user.status.slice(1).toLowerCase()}</span></td><td className="date">{formatDate(user.lastLoginAt)}</td><td className="date">{formatDate(user.createdAt)}</td><td className="creator">{user.createdBy || "System"}</td><td><button className="more-button" aria-label={`Open ${user.fullName}`} onClick={() => window.location.assign(`/admin/users/${user.id}`)}><Icon name="more" size={19} /></button></td></tr>)}</tbody></table>{loading && <div className="empty">Loading users…</div>}{!loading && users.length === 0 && <div className="empty">No users match your filters.</div>}</div>
+            <div className="table-footer"><span>Showing <strong>{users.length}</strong> of <strong>{total}</strong> users</span><div className="pagination"><button disabled>‹</button><button className="current">1</button><button disabled>›</button></div></div>
           </section>
         </div>
       </section>
-      {showAdd && <div className="modal-backdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="dialog-title"><button className="modal-close" onClick={() => setShowAdd(false)}><Icon name="close" /></button><p className="eyebrow">NEW TEAM MEMBER</p><h2 id="dialog-title">Add a user</h2><p>Invite a teammate and set their workspace access.</p><div className="form-grid"><label>Full name<input placeholder="e.g. Somchai Jai Dee" /></label><label>Email address<input type="email" placeholder="name@acme.io" /></label><label>Role<select><option>Viewer</option><option>Dashboard Creator</option><option>Data Source Creator</option><option>Administrator</option></select></label><label>Initial password<input type="password" placeholder="••••••••••" /></label></div><label className="check"><input type="checkbox" defaultChecked /> <span>Require password change on first login</span></label><div className="modal-actions"><button className="secondary-button" onClick={() => setShowAdd(false)}>Cancel</button><button className="primary-button" onClick={() => { setShowAdd(false); showNotice("User invitation created successfully"); }}>Create user</button></div></section></div>}
+      {showAdd && <div className="modal-backdrop" role="presentation"><form className="modal" role="dialog" aria-modal="true" aria-labelledby="dialog-title" onSubmit={create}><button type="button" className="modal-close" onClick={() => setShowAdd(false)}><Icon name="close" /></button><p className="eyebrow">NEW TEAM MEMBER</p><h2 id="dialog-title">Add a user</h2><p>Create an account and set initial workspace access.</p><div className="form-grid"><label>Full name<input name="fullName" required placeholder="e.g. Somchai Jai Dee" /></label><label>Username<input name="username" required minLength={3} placeholder="somchai" /></label><label>Email address<input name="email" required type="email" placeholder="name@acme.io" /></label><label>Role<select name="role"><option value="VIEWER">Viewer</option><option value="DASHBOARD_CREATOR">Dashboard Creator</option><option value="DATA_SOURCE_CREATOR">Data Source Creator</option><option value="ADMIN">Administrator</option></select></label><label>Initial password<input name="password" required type="password" minLength={10} placeholder="••••••••••" /></label></div><label className="check"><input name="mustChangePassword" type="checkbox" defaultChecked /> <span>Require password change on first login</span></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowAdd(false)}>Cancel</button><button className="primary-button" type="submit">Create user</button></div></form></div>}
       {notice && <div className="toast"><span>✓</span>{notice}</div>}
     </main>
   );

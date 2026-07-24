@@ -1,0 +1,4 @@
+import Link from "next/link";
+import { redirect } from "next/navigation";
+import { getCurrentSession } from "@/lib/auth/session";
+export default async function ProfilePage() { const session = await getCurrentSession(); if (!session) redirect("/login"); if (session.user.mustChangePassword) redirect("/change-password"); return <main className="simple-page"><section className="simple-card profile-card"><p className="eyebrow">MY ACCOUNT</p><h1>{session.user.fullName}</h1><dl><div><dt>Username</dt><dd>{session.user.username}</dd></div><div><dt>Email</dt><dd>{session.user.email}</dd></div><div><dt>Role</dt><dd>{session.user.role.replaceAll("_", " ")}</dd></div></dl><div className="profile-actions"><Link href="/profile/security" className="primary-button">Security & sessions</Link>{session.user.role === "ADMIN" && <Link href="/admin/users" className="secondary-button">Administration</Link>}</div></section></main>; }
