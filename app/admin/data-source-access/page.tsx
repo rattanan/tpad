@@ -1,0 +1,1 @@
+import AccessManager from "@/components/data-sources/access-manager"; export default function AccessPage() { return <main className="ds-page"><p className="eyebrow">ADMINISTRATION</p><h1>Data source access</h1><p className="intro">Grant user-specific or role-based access within each role’s security ceiling.</p><AccessManager /></main>; }

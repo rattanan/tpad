@@ -44,7 +44,7 @@ export async function POST(request: NextRequest) {
     const session = await createSession(user.id, meta, input.rememberMe);
     await writeLoginHistory({ userId: user.id, identifier, eventType: "LOGIN", status: "SUCCESS", meta });
     await writeAudit({ actor: { id: user.id, fullName: user.fullName }, action: "LOGIN_SUCCESS", category: "AUTHENTICATION", targetType: "USER", targetId: user.id, targetName: user.email, meta });
-    const response = NextResponse.json({ user: { id: user.id, fullName: user.fullName, username: user.username, email: user.email, role: user.role, mustChangePassword: user.mustChangePassword }, redirectTo: user.mustChangePassword ? "/change-password" : user.role === "ADMIN" ? "/admin/users" : "/profile" });
+    const response = NextResponse.json({ user: { id: user.id, fullName: user.fullName, username: user.username, email: user.email, role: user.role, mustChangePassword: user.mustChangePassword }, redirectTo: user.mustChangePassword ? "/change-password" : "/overview" });
     setSessionCookie(response, session.token, session.expiresAt); response.headers.set("x-request-id", meta.requestId); return response;
   } catch (error) { return apiError(error, meta.requestId); }
 }

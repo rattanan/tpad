@@ -12,8 +12,8 @@ const enterpriseFont = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Atlas — User management",
-  description: "AI Dashboard Builder administration",
+  title: { default: "IFS Insight", template: "%s · IFS Insight" },
+  description: "Governed Oracle intelligence and dashboard workspace for IFS.",
 };
 
 export default function RootLayout({
@@ -22,7 +22,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${enterpriseFont.variable} h-full antialiased`}>
+    <html lang="th" className={`${enterpriseFont.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );

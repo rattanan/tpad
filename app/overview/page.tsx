@@ -1,0 +1,17 @@
+import Link from "next/link";
+import { redirect } from "next/navigation";
+import { getCurrentSession } from "@/lib/auth/session";
+import { listDataSources } from "@/lib/data-sources/service";
+
+export default async function OverviewPage() {
+  const session = await getCurrentSession(); if (!session) redirect("/login");
+  const sources = session.user.role === "VIEWER" ? { items: [], total: 0 } : await listDataSources(session.user, { page: 1, pageSize: 4 });
+  const connected = sources.items.filter((source) => source.connectionStatus === "CONNECTED").length;
+  const synced = sources.items.filter((source) => source.metadataSyncStatus === "SYNCED").length;
+  const firstName = session.user.fullName.split(" ")[0];
+  return <main className="workspace-page"><section className="workspace-welcome"><div><p className="eyebrow">WORKSPACE OVERVIEW</p><h1>Good to see you, {firstName}.</h1><p>Your governed IFS data workspace is ready. Continue where you left off or start something new.</p></div><div className="welcome-signal"><span/><div><strong>Platform operational</strong><small>All core services are available</small></div></div></section>
+    <section className="overview-grid"><article className="overview-stat violet"><span>Data sources</span><strong>{sources.total}</strong><small>{connected} connected in this view</small></article><article className="overview-stat blue"><span>Metadata readiness</span><strong>{sources.total ? `${Math.round((synced / Math.min(sources.total, 4)) * 100)}%` : "—"}</strong><small>{synced} sources synchronized</small></article><article className="overview-stat amber"><span>Dashboards</span><strong>Phase 3</strong><small>Workspace foundation is ready</small></article></section>
+    <div className="overview-columns"><section className="workspace-card"><div className="workspace-card-head"><div><p className="eyebrow">QUICK START</p><h2>Move from data to insight</h2></div></div><div className="quick-actions"><Link href="/dashboards"><span>01</span><div><strong>Dashboard workspace</strong><small>Prepare visual analysis and dashboard projects.</small></div><b>→</b></Link>{session.user.role !== "VIEWER" && <><Link href="/data-sources"><span>02</span><div><strong>Manage data sources</strong><small>Review Oracle connections and sync health.</small></div><b>→</b></Link><Link href="/metadata"><span>03</span><div><strong>Explore IFS metadata</strong><small>Understand tables, columns, and relationships.</small></div><b>→</b></Link></>}</div></section>
+      <section className="workspace-card"><div className="workspace-card-head"><div><p className="eyebrow">RECENT SOURCES</p><h2>Data readiness</h2></div>{session.user.role !== "VIEWER" && <Link href="/data-sources">View all</Link>}</div>{sources.items.length ? <div className="source-summary">{sources.items.map((source) => <Link href={`/data-sources/${source.id}`} key={source.id}><span className="source-symbol">DB</span><div><strong>{source.name}</strong><small>{source.environment} · {source.databaseType}</small></div><em className={source.connectionStatus.toLowerCase()}>{source.connectionStatus.replaceAll("_", " ")}</em></Link>)}</div> : <div className="workspace-empty"><span>✦</span><strong>{session.user.role === "VIEWER" ? "Dashboard access is ready" : "No data sources yet"}</strong><p>{session.user.role === "VIEWER" ? "Your shared dashboards will appear in Phase 3." : "Connect Oracle to start discovering IFS metadata."}</p></div>}</section></div>
+  </main>;
+}

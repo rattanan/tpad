@@ -1,4 +1,6 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# IFS Insight
+
+Governed Oracle intelligence and dashboard workspace for IFS.
 
 ## Getting Started
 
@@ -15,6 +17,17 @@ bun dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+## Phase 2: Oracle data sources
+
+Copy `.env.example` to `.env`, configure `DATABASE_URL`, and create a 32-byte credential-encryption key. Do not commit the generated key.
+
+```bash
+openssl rand -base64 32
+npm run db:migrate
+```
+
+Oracle connections use node-oracledb Thin Mode with bounded per-data-source pools. Data source accounts should be read-only and only receive `CREATE SESSION` plus `SELECT` access to the required application objects and Oracle `ALL_*` metadata views. Avoid `SELECT ANY TABLE` unless separately approved.
 
 ## Reverse proxy deployment
 

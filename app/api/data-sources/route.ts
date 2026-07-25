@@ -1,0 +1,10 @@
+import { NextResponse, type NextRequest } from "next/server";
+import { apiError, HttpError } from "@/lib/http";
+import { getRequestMeta, isSameOrigin } from "@/lib/auth/request";
+import { requireSession } from "@/lib/auth/session";
+import { writeAudit } from "@/lib/auth/audit";
+import { createDataSource, listDataSources, publicDataSource } from "@/lib/data-sources/service";
+import { dataSourceInputSchema } from "@/lib/data-sources/validation";
+import { connectionStatusValues, dataSourceStatusValues, environmentValues } from "@/lib/db/schema";
+export async function GET(request: NextRequest) { const meta = getRequestMeta(request); try { const session = await requireSession(request); const q = request.nextUrl.searchParams; const environment = q.get("environment"); const status = q.get("status"); const connectionStatus = q.get("connectionStatus"); return NextResponse.json(await listDataSources(session.user, { q: q.get("q")?.trim(), environment: environmentValues.includes(environment as never) ? environment as never : undefined, status: dataSourceStatusValues.includes(status as never) ? status as never : undefined, connectionStatus: connectionStatusValues.includes(connectionStatus as never) ? connectionStatus as never : undefined, page: Math.max(1, Number(q.get("page")) || 1), pageSize: Math.min(100, Math.max(1, Number(q.get("pageSize")) || 20)) })); } catch (e) { return apiError(e, meta.requestId); } }
+export async function POST(request: NextRequest) { const meta = getRequestMeta(request); try { if (!isSameOrigin(request)) throw new HttpError(403, "Invalid request origin", "CSRF_REJECTED"); const session = await requireSession(request); const source = await createDataSource(dataSourceInputSchema.parse(await request.json()), session.user); await writeAudit({ actor: session.user, action: "DATA_SOURCE_CREATED", category: "DATA_SOURCE", targetType: "DATA_SOURCE", targetId: source.id, targetName: source.name, meta, newValues: publicDataSource(source, session.user.role) }); return NextResponse.json({ dataSource: publicDataSource(source, session.user.role) }, { status: 201 }); } catch (e) { return apiError(e, meta.requestId); } }
