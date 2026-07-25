@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 type Props = {
   assetId: string;
   assetName: string;
-  assetType: "dashboard" | "KPI";
+  assetType: "dashboard" | "KPI" | "Business Context Model";
   endpoint: string;
   returnHref: string;
 };
@@ -33,7 +33,7 @@ export default function DeleteAssetButton({ assetId, assetName, assetType, endpo
   }
 
   return <>
-    <div className="asset-delete-dock"><button className="danger-button" onClick={() => setOpen(true)}>Delete {assetType}</button></div>
+    <div className="asset-delete-dock"><button className="asset-delete-trigger" onClick={() => setOpen(true)} aria-label={`Delete ${assetType}`} title={`Delete ${assetType}`}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6m4-6v6M9 7l1-3h4l1 3m-9 0 1 13h10l1-13"/></svg></button></div>
     {open && <div className="modal-backdrop asset-delete-backdrop" onMouseDown={() => !busy && setOpen(false)}>
       <section className="modal asset-delete-modal" role="alertdialog" aria-modal="true" aria-labelledby={titleId} onMouseDown={(event) => event.stopPropagation()}>
         <span className="asset-delete-icon" aria-hidden="true">!</span>

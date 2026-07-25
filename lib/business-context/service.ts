@@ -70,6 +70,14 @@ export async function updateBusinessContextModel(id: string, changes: { name?: s
   return requireModel(id);
 }
 
+export async function archiveBusinessContextModel(id: string, user: AuthenticatedUser) {
+  const model = await requireModel(id);
+  await requireBusinessContextPermission(user, model.dataSourceId, "BUSINESS_CONTEXT_DELETE");
+  const timestamp = now();
+  await db.update(businessContextModels).set({ status: "ARCHIVED", deletedAt: timestamp, updatedAt: timestamp, updatedBy: user.id }).where(eq(businessContextModels.id, id));
+  return model;
+}
+
 function inferField(column: typeof dataSourceColumns.$inferSelect) {
   const name = column.columnName.toUpperCase(); const type = column.dataType.toUpperCase(); const numeric = /NUMBER|FLOAT|DECIMAL|INT/.test(type); const date = /DATE|TIMESTAMP/.test(type);
   const technical = ["ROWKEY", "ROWVERSION", "OBJID", "OBJVERSION"].includes(name);
