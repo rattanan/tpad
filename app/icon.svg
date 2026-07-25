@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs><linearGradient id="g" x1="10" y1="8" x2="90" y2="92" gradientUnits="userSpaceOnUse"><stop stop-color="#cc43ff"/><stop offset=".5" stop-color="#8d42ed"/><stop offset="1" stop-color="#4c9fff"/></linearGradient></defs>
+  <rect width="100" height="100" rx="22" fill="#21033a"/>
+  <g fill="url(#g)">
+    <rect x="46" y="4" width="8" height="25" rx="4"/><rect x="46" y="4" width="8" height="25" rx="4" transform="rotate(45 50 50)"/><rect x="46" y="4" width="8" height="25" rx="4" transform="rotate(90 50 50)"/><rect x="46" y="4" width="8" height="25" rx="4" transform="rotate(135 50 50)"/><rect x="46" y="4" width="8" height="25" rx="4" transform="rotate(180 50 50)"/><rect x="46" y="4" width="8" height="25" rx="4" transform="rotate(225 50 50)"/><rect x="46" y="4" width="8" height="25" rx="4" transform="rotate(270 50 50)"/><rect x="46" y="4" width="8" height="25" rx="4" transform="rotate(315 50 50)"/>
+    <rect x="47" y="9" width="6" height="19" rx="3" transform="rotate(22.5 50 50)"/><rect x="47" y="9" width="6" height="19" rx="3" transform="rotate(67.5 50 50)"/><rect x="47" y="9" width="6" height="19" rx="3" transform="rotate(112.5 50 50)"/><rect x="47" y="9" width="6" height="19" rx="3" transform="rotate(157.5 50 50)"/><rect x="47" y="9" width="6" height="19" rx="3" transform="rotate(202.5 50 50)"/><rect x="47" y="9" width="6" height="19" rx="3" transform="rotate(247.5 50 50)"/><rect x="47" y="9" width="6" height="19" rx="3" transform="rotate(292.5 50 50)"/><rect x="47" y="9" width="6" height="19" rx="3" transform="rotate(337.5 50 50)"/>
+  </g>
+</svg>

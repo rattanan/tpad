@@ -1,0 +1,1 @@
+import LoadingState from "@/components/ui/loading-state"; export default function Loading(){return <main className="workspace-page"><LoadingState label="Loading Business Context and governed metadata…"/></main>;}

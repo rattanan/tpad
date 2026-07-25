@@ -1,0 +1,11 @@
+import type { NextRequest } from "next/server";
+import { requireSession } from "@/lib/auth/session";
+import { getRequestMeta, isSameOrigin } from "@/lib/auth/request";
+import { writeAudit } from "@/lib/auth/audit";
+import { apiError, HttpError } from "@/lib/http";
+import { transitionKpi, transitionModel } from "./service";
+import { workflowSchema } from "./validation";
+
+export type IdContext = { params: Promise<{ id: string }> };
+export async function modelActionHandler(request: NextRequest, context: IdContext, action: "SUBMIT" | "APPROVE" | "PUBLISH" | "CREATE_VERSION" | "ROLLBACK" | "ARCHIVE", auditAction: string) { const meta = getRequestMeta(request); try { if (!isSameOrigin(request)) throw new HttpError(403, "Invalid request origin", "CSRF_REJECTED"); const session = await requireSession(request); const id = (await context.params).id; const input = workflowSchema.parse(await request.json().catch(() => ({}))); const model = await transitionModel(id, action, session.user, input.changeSummary, input.sourceVersionId); await writeAudit({ actor: session.user, action: auditAction, category: "BUSINESS_CONTEXT", targetType: "BUSINESS_CONTEXT_MODEL", targetId: id, newValues: { status: model.status, version: model.version, changeSummary: input.changeSummary, sourceVersionId: input.sourceVersionId }, meta }); return Response.json({ model }); } catch (error) { return apiError(error, meta.requestId); } }
+export async function kpiActionHandler(request: NextRequest, context: IdContext, action: "SUBMIT" | "APPROVE" | "CERTIFY", auditAction: string) { const meta = getRequestMeta(request); try { if (!isSameOrigin(request)) throw new HttpError(403, "Invalid request origin", "CSRF_REJECTED"); const session = await requireSession(request); const id = (await context.params).id; const input = workflowSchema.parse(await request.json().catch(() => ({}))); const kpi = await transitionKpi(id, action, session.user, input.changeSummary); await writeAudit({ actor: session.user, action: auditAction, category: "KPI", targetType: "KPI", targetId: id, newValues: { status: kpi.status, changeSummary: input.changeSummary }, meta }); return Response.json({ kpi }); } catch (error) { return apiError(error, meta.requestId); } }

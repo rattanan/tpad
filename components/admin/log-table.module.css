@@ -1,0 +1,16 @@
+.list article {
+  grid-template-columns: minmax(0, 170px) minmax(0, 180px) minmax(0, 1fr) minmax(0, 185px);
+}
+
+.cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .list article {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}

@@ -18,7 +18,7 @@ export async function canAccessDataSource(user: AuthenticatedUser, sourceId: str
   if (!roleAllowsDataSourcePermission(user.role, permission)) return false;
   const source = await getDataSource(sourceId); if (!source) return false;
   if (source.status === "ARCHIVED") return permission === "VIEW_METADATA" && (user.role === "ADMIN" || source.ownerUserId === user.id);
-  if (user.role === "ADMIN" || (user.role === "DATA_SOURCE_CREATOR" && source.ownerUserId === user.id)) return true;
+  if (user.role === "ADMIN" || (user.role === "DATA_SOURCE_CREATOR" && source.ownerUserId === user.id && permission !== "PUBLISH_BUSINESS_CONTEXT")) return true;
   const grants = await db.select().from(dataSourceAccess).where(and(eq(dataSourceAccess.dataSourceId, sourceId), isNull(dataSourceAccess.revokedAt)));
   return grants.some((grant) => (grant.userId === user.id || grant.role === user.role) && grant.permission === permission);
 }
