@@ -1,0 +1,5 @@
+import { redirect } from "next/navigation";
+import { getCurrentSession } from "@/lib/auth/session";
+import { hasPermission } from "@/lib/auth/permissions";
+import DashboardCreateWizard from "@/components/dashboards/create-wizard";
+export default async function NewDashboardPage(){const session=await getCurrentSession();if(!session)redirect("/login");if(!hasPermission(session.user.role,"CREATE_DASHBOARD"))redirect("/workspace/dashboards");return <DashboardCreateWizard/>;}

@@ -4,7 +4,7 @@ import { db } from "@/lib/db";
 import {
   aiBusinessContextRecommendations, businessContextModels, businessContextModelVersions, businessContextReviewActions, businessContextReviewRequests,
   businessDomains, businessFields, businessGlossaryTerms, businessObjects, businessRelationships, businessSynonyms,
-  dataSourceColumns, dataSources, dataSourceTables, kpiDefinitions, kpiFilters, kpiFormulaNodes, kpiSourceFields, kpiThresholds, kpiValidationResults,
+  dataSourceColumns, dataSources, dataSourceTables, kpiDefinitions, kpiDefinitionVersions, kpiFilters, kpiFormulaNodes, kpiSourceFields, kpiThresholds, kpiValidationResults,
   type Role,
 } from "@/lib/db/schema";
 import type { AuthenticatedUser } from "@/lib/auth/session";
@@ -182,9 +182,22 @@ async function persistFormulaNodes(kpiId: string, root: FormulaNode, userId: str
 export async function getKpi(id: string, user: AuthenticatedUser) {
   const kpi = (await db.select().from(kpiDefinitions).where(and(eq(kpiDefinitions.id, id), isNull(kpiDefinitions.deletedAt))).limit(1))[0]; if (!kpi) throw new HttpError(404, "KPI not found", "NOT_FOUND");
   await requireBusinessContextPermission(user, kpi.dataSourceId, "KPI_VIEW"); if ((user.role === "DASHBOARD_CREATOR" || user.role === "VIEWER") && !["APPROVED", "CERTIFIED"].includes(kpi.status)) throw new HttpError(404, "KPI not found", "NOT_FOUND");
-  const [sourceFields, filters, thresholds] = await Promise.all([db.select().from(kpiSourceFields).where(and(eq(kpiSourceFields.kpiId, id), isNull(kpiSourceFields.deletedAt))), db.select().from(kpiFilters).where(and(eq(kpiFilters.kpiId, id), isNull(kpiFilters.deletedAt))), db.select().from(kpiThresholds).where(and(eq(kpiThresholds.kpiId, id), isNull(kpiThresholds.deletedAt)))]);
-  if (maySeePhysicalMetadata(user)) return { ...kpi, formulaAst: parseJson<FormulaNode | null>(kpi.formulaAst, null), sourceFields, filters, thresholds };
-  const publicKpi = omit(kpi, ["formulaAst", "dataSourceId"] as const); return { ...publicKpi, sourceFields: [], filters: [], thresholds };
+  const [sourceFields, filters, thresholds, versions] = await Promise.all([db.select().from(kpiSourceFields).where(and(eq(kpiSourceFields.kpiId, id), isNull(kpiSourceFields.deletedAt))), db.select().from(kpiFilters).where(and(eq(kpiFilters.kpiId, id), isNull(kpiFilters.deletedAt))), db.select().from(kpiThresholds).where(and(eq(kpiThresholds.kpiId, id), isNull(kpiThresholds.deletedAt))), db.select().from(kpiDefinitionVersions).where(eq(kpiDefinitionVersions.kpiId, id)).orderBy(desc(kpiDefinitionVersions.versionNumber))]);
+  if (maySeePhysicalMetadata(user)) return { ...kpi, formulaAst: parseJson<FormulaNode | null>(kpi.formulaAst, null), sourceFields, filters, thresholds, versions };
+  const publicKpi = omit(kpi, ["formulaAst", "dataSourceId"] as const); return { ...publicKpi, sourceFields: [], filters: [], thresholds, versions: versions.map((item) => omit(item, ["snapshotJson"] as const)) };
+}
+
+async function persistKpiVersion(kpi: typeof kpiDefinitions.$inferSelect, userId: string) {
+  const existing = await db.select({ id: kpiDefinitionVersions.id }).from(kpiDefinitionVersions).where(and(eq(kpiDefinitionVersions.kpiId, kpi.id), eq(kpiDefinitionVersions.versionNumber, kpi.version))).limit(1);
+  if (existing.length) { await db.update(kpiDefinitionVersions).set({ status: kpi.status === "CERTIFIED" ? "CERTIFIED" : "APPROVED", snapshotJson: json(kpi), changeReason: kpi.changeReason, approvedBy: kpi.approvedBy, approvedAt: kpi.approvalDate }).where(eq(kpiDefinitionVersions.id, existing[0].id)); return; }
+  await db.insert(kpiDefinitionVersions).values({ id: randomUUID(), kpiId: kpi.id, versionNumber: kpi.version, status: kpi.status === "CERTIFIED" ? "CERTIFIED" : "APPROVED", snapshotJson: json(kpi), changeReason: kpi.changeReason, approvedBy: kpi.approvedBy, approvedAt: kpi.approvalDate, createdBy: userId, createdAt: now() });
+}
+
+export async function createKpiVersion(id: string, user: AuthenticatedUser, changeReason?: string) {
+  const kpi = (await db.select().from(kpiDefinitions).where(and(eq(kpiDefinitions.id, id), isNull(kpiDefinitions.deletedAt))).limit(1))[0]; if (!kpi) throw new HttpError(404, "KPI not found", "NOT_FOUND");
+  await requireBusinessContextPermission(user, kpi.dataSourceId, "KPI_UPDATE"); if (!["APPROVED", "CERTIFIED"].includes(kpi.status)) throw new HttpError(409, "Only an approved or certified KPI can create a new version", "INVALID_WORKFLOW_STATE");
+  await persistKpiVersion(kpi, user.id); const timestamp = now(); await db.update(kpiDefinitions).set({ status: "DRAFT", certificationStatus: "UNVERIFIED", version: kpi.version + 1, reviewedBy: null, approvedBy: null, approvalDate: null, effectiveDate: null, expiryDate: null, changeReason: changeReason || `Draft version ${kpi.version + 1} from published version ${kpi.version}`, draftedBy: user.id, updatedBy: user.id, updatedAt: timestamp }).where(eq(kpiDefinitions.id, id));
+  return getKpi(id, user);
 }
 
 export async function listKpis(user: AuthenticatedUser, input: { q?: string; modelId?: string; status?: string }) {
@@ -193,6 +206,15 @@ export async function listKpis(user: AuthenticatedUser, input: { q?: string; mod
   if (user.role === "DASHBOARD_CREATOR" || user.role === "VIEWER") filters.push(inArray(kpiDefinitions.status, ["APPROVED", "CERTIFIED"]));
   const rows = await db.select().from(kpiDefinitions).where(and(...filters)).orderBy(asc(kpiDefinitions.name));
   return maySeePhysicalMetadata(user) ? rows : rows.map((item) => omit(item, ["formulaAst", "dataSourceId"] as const));
+}
+
+export async function archiveKpi(id: string, user: AuthenticatedUser) {
+  const kpi = (await db.select().from(kpiDefinitions).where(and(eq(kpiDefinitions.id, id), isNull(kpiDefinitions.deletedAt))).limit(1))[0];
+  if (!kpi) throw new HttpError(404, "KPI not found", "NOT_FOUND");
+  await requireBusinessContextPermission(user, kpi.dataSourceId, "KPI_DELETE");
+  const timestamp = now();
+  await db.update(kpiDefinitions).set({ status: "ARCHIVED", deletedAt: timestamp, updatedAt: timestamp, updatedBy: user.id }).where(eq(kpiDefinitions.id, id));
+  return kpi;
 }
 
 async function snapshotModel(model: Model) {
@@ -289,7 +311,7 @@ export async function updateBusinessRelationship(id: string, changes: Partial<ty
 }
 
 export async function updateKpi(id: string, changes: Partial<Omit<Parameters<typeof createKpi>[0], "modelId">> & { status?: typeof kpiDefinitions.$inferInsert.status }, user: AuthenticatedUser) {
-  const item = (await db.select().from(kpiDefinitions).where(and(eq(kpiDefinitions.id, id), isNull(kpiDefinitions.deletedAt))).limit(1))[0]; if (!item) throw new HttpError(404, "KPI not found", "NOT_FOUND"); const model = await requireModel(item.modelId); await requireBusinessContextPermission(user, item.dataSourceId, "KPI_UPDATE"); assertEditable(model.status); const timestamp = now();
+  const item = (await db.select().from(kpiDefinitions).where(and(eq(kpiDefinitions.id, id), isNull(kpiDefinitions.deletedAt))).limit(1))[0]; if (!item) throw new HttpError(404, "KPI not found", "NOT_FOUND"); await requireModel(item.modelId); await requireBusinessContextPermission(user, item.dataSourceId, "KPI_UPDATE"); if (!["DRAFT", "CHANGES_REQUESTED"].includes(item.status)) throw new HttpError(409, "Approved and certified KPI versions are immutable. Create a new version before editing.", "IMMUTABLE_KPI_VERSION"); const timestamp = now();
   let formulaFields: Array<typeof businessFields.$inferSelect> = [];
   if (changes.formulaAst) { const ids = [...collectFormulaFieldIds(changes.formulaAst)]; formulaFields = ids.length ? await db.select().from(businessFields).where(and(inArray(businessFields.id, ids), isNull(businessFields.deletedAt))) : []; if (formulaFields.length !== ids.length || formulaFields.some((field) => field.modelId !== item.modelId)) throw new HttpError(400, "KPI formula contains fields outside the model", "SCOPE_MISMATCH"); }
   const mapped = { ...changes, tags: changes.tags ? json(changes.tags) : undefined, formulaAst: changes.formulaAst ? json(changes.formulaAst) : undefined, dateLogic: changes.dateLogic ? json(changes.dateLogic) : undefined, divisionByZeroHandling: changes.divisionByZeroHandling };
@@ -299,10 +321,10 @@ export async function updateKpi(id: string, changes: Partial<Omit<Parameters<typ
 }
 
 export async function transitionKpi(id: string, action: "SUBMIT" | "APPROVE" | "CERTIFY", user: AuthenticatedUser, comment?: string) {
-  const kpi = (await db.select().from(kpiDefinitions).where(and(eq(kpiDefinitions.id, id), isNull(kpiDefinitions.deletedAt))).limit(1))[0]; if (!kpi) throw new HttpError(404, "KPI not found", "NOT_FOUND"); const permission = action === "SUBMIT" ? "KPI_REVIEW" : action === "APPROVE" ? "KPI_APPROVE" : "KPI_CERTIFY"; await requireBusinessContextPermission(user, kpi.dataSourceId, permission); const model = await requireModel(kpi.modelId); assertEditable(model.status); const timestamp = now();
-  if (action === "SUBMIT") { if (!["DRAFT", "CHANGES_REQUESTED"].includes(kpi.status)) throw new HttpError(409, "Only a KPI draft can be submitted", "INVALID_WORKFLOW_STATE"); const latest = (await db.select().from(kpiValidationResults).where(eq(kpiValidationResults.kpiId, id)).orderBy(desc(kpiValidationResults.validatedAt)).limit(1))[0]; if (!latest || latest.result === "FAILED") throw new HttpError(409, "KPI must pass validation before review", "VALIDATION_REQUIRED"); await db.insert(businessContextReviewRequests).values({ id: randomUUID(), modelId: kpi.modelId, kpiId: id, reviewStage: "BUSINESS_OWNER_REVIEW", requestedBy: user.id, requestedAt: timestamp, createdAt: timestamp, updatedAt: timestamp }); await db.update(kpiDefinitions).set({ status: "UNDER_REVIEW", reviewedBy: user.id, updatedBy: user.id, updatedAt: timestamp }).where(eq(kpiDefinitions.id, id)); }
-  if (action === "APPROVE") { if (kpi.status !== "UNDER_REVIEW") throw new HttpError(409, "KPI must be under review", "INVALID_WORKFLOW_STATE"); await db.update(kpiDefinitions).set({ status: "APPROVED", certificationStatus: "BUSINESS_VALIDATED", approvedBy: user.id, approvalDate: timestamp, updatedBy: user.id, updatedAt: timestamp }).where(eq(kpiDefinitions.id, id)); }
-  if (action === "CERTIFY") { if (kpi.status !== "APPROVED") throw new HttpError(409, "Only an approved KPI can be certified", "INVALID_WORKFLOW_STATE"); await db.update(kpiDefinitions).set({ status: "CERTIFIED", certificationStatus: "CERTIFIED", approvedBy: user.id, approvalDate: timestamp, changeReason: comment, updatedBy: user.id, updatedAt: timestamp }).where(eq(kpiDefinitions.id, id)); }
+  const kpi = (await db.select().from(kpiDefinitions).where(and(eq(kpiDefinitions.id, id), isNull(kpiDefinitions.deletedAt))).limit(1))[0]; if (!kpi) throw new HttpError(404, "KPI not found", "NOT_FOUND"); const permission = action === "SUBMIT" ? "KPI_REVIEW" : action === "APPROVE" ? "KPI_APPROVE" : "KPI_CERTIFY"; await requireBusinessContextPermission(user, kpi.dataSourceId, permission); await requireModel(kpi.modelId); const timestamp = now();
+  if (action === "SUBMIT") { if (!["DRAFT", "CHANGES_REQUESTED"].includes(kpi.status)) throw new HttpError(409, "Only a KPI draft can be submitted", "INVALID_WORKFLOW_STATE"); const latest = (await db.select().from(kpiValidationResults).where(and(eq(kpiValidationResults.kpiId, id), eq(kpiValidationResults.version, kpi.version))).orderBy(desc(kpiValidationResults.validatedAt)).limit(1))[0]; if (!latest || latest.result === "FAILED") throw new HttpError(409, "This KPI version must pass validation before review", "VALIDATION_REQUIRED"); await db.insert(businessContextReviewRequests).values({ id: randomUUID(), modelId: kpi.modelId, kpiId: id, reviewStage: "BUSINESS_OWNER_REVIEW", requestedBy: user.id, requestedAt: timestamp, version: kpi.version, createdAt: timestamp, updatedAt: timestamp }); await db.update(kpiDefinitions).set({ status: "UNDER_REVIEW", reviewedBy: user.id, updatedBy: user.id, updatedAt: timestamp }).where(eq(kpiDefinitions.id, id)); }
+  if (action === "APPROVE") { if (kpi.status !== "UNDER_REVIEW") throw new HttpError(409, "KPI must be under review", "INVALID_WORKFLOW_STATE"); await db.update(kpiDefinitions).set({ status: "APPROVED", certificationStatus: "BUSINESS_VALIDATED", approvedBy: user.id, approvalDate: timestamp, updatedBy: user.id, updatedAt: timestamp }).where(eq(kpiDefinitions.id, id)); const approved = (await db.select().from(kpiDefinitions).where(eq(kpiDefinitions.id, id)).limit(1))[0]; await persistKpiVersion(approved, user.id); }
+  if (action === "CERTIFY") { if (kpi.status !== "APPROVED") throw new HttpError(409, "Only an approved KPI can be certified", "INVALID_WORKFLOW_STATE"); await db.update(kpiDefinitions).set({ status: "CERTIFIED", certificationStatus: "CERTIFIED", approvedBy: user.id, approvalDate: timestamp, changeReason: comment, updatedBy: user.id, updatedAt: timestamp }).where(eq(kpiDefinitions.id, id)); const certified = (await db.select().from(kpiDefinitions).where(eq(kpiDefinitions.id, id)).limit(1))[0]; await persistKpiVersion(certified, user.id); }
   return getKpi(id, user);
 }
 

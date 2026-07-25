@@ -46,6 +46,8 @@ stateDiagram-v2
 
 Published versions are immutable. Further editing clones the exact context, KPI, blocks, filters, and layout into a new draft version.
 
+Approved and certified KPI versions are also immutable. `Create new version` stores the current KPI in `kpi_definition_versions`, opens the next version as a draft, and requires validation/review again. Existing dashboard blocks keep their original `kpiId + kpiVersion`; query generation loads that immutable snapshot and never upgrades a published dashboard silently.
+
 ## Builder workflow
 
 1. Define purpose, objective, audience, questions, category, refresh expectation, and date range.

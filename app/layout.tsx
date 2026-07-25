@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
+import { APP_VERSION } from "@/lib/app-version";
 
 const enterpriseFont = localFont({
   src: [
@@ -23,7 +24,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="th" className={`${enterpriseFont.variable} h-full antialiased`}>
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">{children}<footer className="global-version-footer">IFS Insight <span>·</span> Version {APP_VERSION}</footer></body>
     </html>
   );
 }

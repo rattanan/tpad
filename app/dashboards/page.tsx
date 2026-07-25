@@ -1,2 +1,10 @@
-import Link from "next/link"; import { redirect } from "next/navigation"; import { getCurrentSession } from "@/lib/auth/session"; import { hasPermission } from "@/lib/auth/permissions"; import { listDashboards } from "@/lib/dashboards/service";
-export default async function DashboardsPage() { const session = await getCurrentSession(); if (!session) redirect("/login"); const items = await listDashboards(session.user); return <main className="workspace-page dashboard-index"><header className="dashboard-page-head"><div><p className="eyebrow">GUIDED ANALYTICS</p><h1>Dashboards</h1><p>Build governed IFS dashboards from published Business Context and approved KPIs.</p></div>{hasPermission(session.user.role,"CREATE_DASHBOARD")&&<Link className="primary-button" href="/dashboards/new">＋ Create dashboard</Link>}</header><section className="dashboard-summary"><article><span>All dashboards</span><strong>{items.length}</strong></article><article><span>Draft and review</span><strong>{items.filter((item)=>["DRAFT","READY_FOR_REVIEW","IN_REVIEW","CHANGES_REQUESTED"].includes(item.status)).length}</strong></article><article><span>Published</span><strong>{items.filter((item)=>item.status==="PUBLISHED").length}</strong></article></section><div className="dashboard-list">{items.map((item)=><Link href={`/dashboards/${item.id}`} key={item.id}><div className="dashboard-list-icon">▦</div><div><span>{item.category}</span><h2>{item.name}</h2><p>{item.description||"Business purpose and governed metrics."}</p><small>Updated {new Date(item.updatedAt).toLocaleString()}</small></div><em className={`dashboard-status ${item.status.toLowerCase()}`}>{item.status.replaceAll("_"," ")}</em></Link>)}{!items.length&&<div className="workspace-empty"><span>▦</span><strong>No dashboard projects yet</strong><p>Start with a business purpose, published context, and guided layout.</p>{hasPermission(session.user.role,"CREATE_DASHBOARD")&&<Link className="primary-button" href="/dashboards/new">Create first dashboard</Link>}</div>}</div></main>; }
+import { redirect } from "next/navigation";
+import { getCurrentSession } from "@/lib/auth/session";
+import { listPublishedDashboards } from "@/lib/published-dashboards/service";
+import DashboardPortal from "@/components/published-dashboards/dashboard-portal";
+
+export default async function PublishedDashboardsPage() {
+  const session = await getCurrentSession(); if (!session) redirect("/login");
+  const dashboards = await listPublishedDashboards(session.user);
+  return <DashboardPortal initialJson={JSON.stringify(dashboards)} />;
+}

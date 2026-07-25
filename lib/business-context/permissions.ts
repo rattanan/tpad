@@ -7,7 +7,7 @@ import { HttpError } from "@/lib/http";
 const managePermissions = new Set<Permission>([
   "BUSINESS_CONTEXT_CREATE", "BUSINESS_CONTEXT_UPDATE", "BUSINESS_CONTEXT_DELETE", "BUSINESS_CONTEXT_ANALYZE", "BUSINESS_CONTEXT_REVIEW", "BUSINESS_CONTEXT_APPROVE", "BUSINESS_CONTEXT_ROLLBACK",
   "BUSINESS_OBJECT_MANAGE", "BUSINESS_FIELD_MANAGE", "BUSINESS_RELATIONSHIP_MANAGE", "BUSINESS_RELATIONSHIP_VALIDATE",
-  "KPI_CREATE", "KPI_UPDATE", "KPI_VALIDATE", "KPI_TEST", "KPI_REVIEW", "KPI_APPROVE", "KPI_CERTIFY", "BUSINESS_GLOSSARY_MANAGE",
+  "KPI_CREATE", "KPI_UPDATE", "KPI_DELETE", "KPI_VALIDATE", "KPI_TEST", "KPI_REVIEW", "KPI_APPROVE", "KPI_CERTIFY", "BUSINESS_GLOSSARY_MANAGE",
 ]);
 
 export async function requireBusinessContextPermission(user: AuthenticatedUser, dataSourceId: string, permission: Permission) {
@@ -22,7 +22,7 @@ export async function requireBusinessContextPermission(user: AuthenticatedUser, 
 }
 
 export function assertEditable(status: string) {
-  if (status === "PUBLISHED" || status === "ARCHIVED") throw new HttpError(409, "Published or archived metadata is immutable. Create a new draft version to make changes.", "IMMUTABLE_VERSION");
+  if (!["DRAFT", "CHANGES_REQUESTED"].includes(status)) throw new HttpError(409, "Only a draft or changes-requested version can be edited. Create a new draft version first.", "IMMUTABLE_VERSION");
 }
 
 export const maySeePhysicalMetadata = (user: AuthenticatedUser) => user.role === "ADMIN" || user.role === "DATA_SOURCE_CREATOR";

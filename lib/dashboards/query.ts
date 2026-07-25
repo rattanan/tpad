@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { businessFields, dashboardBlocks, dashboardVersions, kpiDefinitions } from "@/lib/db/schema";
+import { businessFields, dashboardBlocks, dashboardVersions, kpiDefinitions, kpiDefinitionVersions } from "@/lib/db/schema";
 import type { AuthenticatedUser } from "@/lib/auth/session";
 import { compileKpi } from "@/lib/business-context/kpi";
 import { getDataSource } from "@/lib/data-sources/service";
@@ -17,13 +17,14 @@ type Bind = string | number | boolean | Date | null;
 const identifier = (value: string) => { if (!/^[A-Za-z][A-Za-z0-9_$#]*$/.test(value)) throw new HttpError(400, "Unsafe Oracle identifier", "UNSAFE_IDENTIFIER"); return `"${value.toUpperCase()}"`; };
 const operatorSql: Record<Filter["operator"], string> = { EQ: "=", NE: "<>", IN: "IN", NOT_IN: "NOT IN", GT: ">", GTE: ">=", LT: "<", LTE: "<=", BETWEEN: "BETWEEN", IS_NULL: "IS NULL", IS_NOT_NULL: "IS NOT NULL" };
 
-export async function generateBlockQuery(block: typeof dashboardBlocks.$inferSelect, version: typeof dashboardVersions.$inferSelect, previewLimit = 100) {
+export async function generateBlockQuery(block: typeof dashboardBlocks.$inferSelect, version: typeof dashboardVersions.$inferSelect, previewLimit = 100, runtimeFilters: Filter[] = []) {
   if (!block.kpiId) throw new HttpError(400, "Select an approved or certified KPI", "KPI_REQUIRED");
   const kpi = (await db.select().from(kpiDefinitions).where(and(eq(kpiDefinitions.id, block.kpiId), eq(kpiDefinitions.modelId, version.businessContextModelId), isNull(kpiDefinitions.deletedAt))).limit(1))[0];
-  if (!kpi || !["APPROVED", "CERTIFIED"].includes(kpi.status)) throw new HttpError(400, "Only approved or certified KPIs may be used", "KPI_NOT_APPROVED");
-  if (block.kpiVersion !== kpi.version) throw new HttpError(409, "The locked KPI version no longer matches this block", "KPI_VERSION_MISMATCH");
-  const compiled = await compileKpi(kpi);
-  const filters = JSON.parse(block.filtersJson || "[]") as Filter[];
+  if (!kpi) throw new HttpError(400, "KPI definition is unavailable", "KPI_NOT_APPROVED");
+  let lockedKpi = kpi;
+  if (block.kpiVersion !== kpi.version) { const snapshot = (await db.select().from(kpiDefinitionVersions).where(and(eq(kpiDefinitionVersions.kpiId, kpi.id), eq(kpiDefinitionVersions.versionNumber, block.kpiVersion!))).limit(1))[0]; if (!snapshot) throw new HttpError(409, "The locked KPI version snapshot is unavailable", "KPI_VERSION_MISMATCH"); lockedKpi = { ...kpi, ...(JSON.parse(snapshot.snapshotJson) as typeof kpi), id: kpi.id, modelId: kpi.modelId, dataSourceId: kpi.dataSourceId, version: snapshot.versionNumber, status: snapshot.status === "CERTIFIED" ? "CERTIFIED" : "APPROVED" }; } else if (!["APPROVED", "CERTIFIED"].includes(kpi.status)) throw new HttpError(400, "Only approved or certified KPIs may be used", "KPI_NOT_APPROVED");
+  const compiled = await compileKpi(lockedKpi);
+  const filters = [...(JSON.parse(block.filtersJson || "[]") as Filter[]), ...runtimeFilters];
   const dimensions = block.dimensionFieldId ? [{ businessFieldId: block.dimensionFieldId, granularity: (block.visualizationType === "LINE" || block.visualizationType === "AREA" ? "MONTH" : "NONE") as "MONTH" | "NONE" }] : [];
   const plan = queryPlanSchema.parse({ businessContextVersionId: version.businessContextVersionId, dataSourceId: version.dataSourceId, measure: { kpiId: kpi.id, kpiVersion: kpi.version }, dimensions, filters, sort: [], limit: Math.min(500, Math.max(1, previewLimit)), relationshipPathIds: compiled.relationships.filter((item) => item.approvalStatus === "APPROVED").map((item) => item.id) });
   const fieldIds = [...new Set([...dimensions.map((item) => item.businessFieldId), ...filters.map((item) => item.businessFieldId)])];
@@ -36,7 +37,7 @@ export async function generateBlockQuery(block: typeof dashboardBlocks.$inferSel
   if (dimensions[0]) { const dim = column(dimensions[0].businessFieldId); const expression = dimensions[0].granularity === "MONTH" ? `TRUNC(${dim.sql}, 'MM')` : dim.sql; dimensionSql = `${expression} AS DIMENSION_VALUE, `; groupSql = ` GROUP BY ${expression}`; }
   const predicates = filters.map((filter) => { const target = column(filter.businessFieldId); if (!target.field.filterable) throw new HttpError(400, "Selected field is not filterable", "FILTER_NOT_ALLOWED"); const op = operatorSql[filter.operator]; if (["IS_NULL", "IS_NOT_NULL"].includes(filter.operator)) return `${target.sql} ${op}`; if (["IN", "NOT_IN"].includes(filter.operator) && filter.values.length) return `${target.sql} ${op} (${filter.values.map(bind).join(", ")})`; if (filter.operator === "BETWEEN" && filter.values.length === 2) return `${target.sql} BETWEEN ${bind(filter.values[0])} AND ${bind(filter.values[1])}`; if (filter.values.length === 1) return `${target.sql} ${op} ${bind(filter.values[0])}`; throw new HttpError(400, "Filter values do not match the operator", "INVALID_FILTER"); });
   const sql = assertSafeDashboardSql(`SELECT ${dimensionSql}${compiled.expression} AS KPI_VALUE FROM ${compiled.fromSql}${predicates.length ? ` WHERE ${predicates.join(" AND ")}` : ""}${groupSql} FETCH FIRST :dashboardRowLimit ROWS ONLY`);
-  return { plan, sql, binds, fingerprint: createHash("sha256").update(sql).digest("hex"), kpi };
+  return { plan, sql, binds, fingerprint: createHash("sha256").update(sql).digest("hex"), kpi: lockedKpi };
 }
 
 let activePreviews = 0;

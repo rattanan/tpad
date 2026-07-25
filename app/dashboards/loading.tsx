@@ -1,0 +1,1 @@
+export default function DashboardLoading(){return <main className="published-page" aria-busy="true"><div className="portal-hero skeleton-block"/><div className="portal-grid">{Array.from({length:6},(_,index)=><div className="portal-card skeleton-block" key={index}/>)}</div><p className="loading-status"><span className="insight-spinner"/>Loading published dashboards…</p></main>}

@@ -1,7 +1,7 @@
-import { and, desc, eq, isNull, like, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, like, or } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db } from "@/lib/db";
-import { dataSourceAccess, dataSourceConnectionTests, dataSources, users, type DataSourceAccessPermission, type Role } from "@/lib/db/schema";
+import { dataSourceAccess, dataSourceConnectionTests, dataSources, metadataSyncRuns, users, type DataSourceAccessPermission, type Role } from "@/lib/db/schema";
 import { HttpError } from "@/lib/http";
 import { encryptCredential } from "./credentials";
 import type { AuthenticatedUser } from "@/lib/auth/session";
@@ -29,6 +29,25 @@ export async function listDataSources(user: AuthenticatedUser, input: { q?: stri
   const rows = await db.select().from(dataSources).where(filters.length ? and(...filters) : undefined).orderBy(desc(dataSources.updatedAt));
   const visible = user.role === "ADMIN" ? rows : (await Promise.all(rows.map(async (row) => row.ownerUserId === user.id || await canAccessDataSource(user, row.id, "VIEW_METADATA") ? row : null))).filter((row): row is Source => Boolean(row));
   return { items: visible.slice((input.page - 1) * input.pageSize, input.page * input.pageSize).map((row) => publicDataSource(row, user.role)), total: visible.length, page: input.page, pageSize: input.pageSize };
+}
+
+export async function getDataSourceOverview(user: AuthenticatedUser, recentLimit = 4) {
+  const visible = await listDataSources(user, { page: 1, pageSize: 10_000 });
+  const sourceIds = visible.items.map((source) => source.id);
+  if (!sourceIds.length) return { total: 0, connected: 0, synced: 0, tables: 0, views: 0, columns: 0, recent: [] };
+  const syncRuns = await db.select({ dataSourceId: metadataSyncRuns.dataSourceId, tables: metadataSyncRuns.tablesFound, views: metadataSyncRuns.viewsFound, columns: metadataSyncRuns.columnsFound }).from(metadataSyncRuns).where(and(inArray(metadataSyncRuns.dataSourceId, sourceIds), inArray(metadataSyncRuns.status, ["COMPLETED", "PARTIAL"]))).orderBy(desc(metadataSyncRuns.startedAt));
+  const objectCounts = new Map<string, { tables: number; views: number; columns: number }>();
+  for (const sourceId of sourceIds) objectCounts.set(sourceId, { tables: 0, views: 0, columns: 0 });
+  const summarizedSources = new Set<string>();
+  for (const run of syncRuns) if (!summarizedSources.has(run.dataSourceId)) { objectCounts.set(run.dataSourceId, { tables: run.tables, views: run.views, columns: run.columns }); summarizedSources.add(run.dataSourceId); }
+  const totals = [...objectCounts.values()].reduce((sum, item) => ({ tables: sum.tables + item.tables, views: sum.views + item.views, columns: sum.columns + item.columns }), { tables: 0, views: 0, columns: 0 });
+  return {
+    total: visible.total,
+    connected: visible.items.filter((source) => source.connectionStatus === "CONNECTED").length,
+    synced: visible.items.filter((source) => source.metadataSyncStatus === "SYNCED").length,
+    ...totals,
+    recent: visible.items.slice(0, recentLimit).map((source) => ({ ...source, ...objectCounts.get(source.id)! })),
+  };
 }
 export type DataSourceInput = { name: string; description?: string; environment: "DEVELOPMENT" | "TEST" | "UAT" | "PRODUCTION"; status: "DRAFT" | "ACTIVE" | "INACTIVE"; host: string; port: number; connectionMode: "SERVICE_NAME" | "SID" | "CONNECTION_STRING"; connectionString?: string; serviceName?: string; sid?: string; username: string; password: string; defaultSchema?: string; allowedSchemas: string[]; connectionTimeoutSeconds: number; queryTimeoutSeconds: number };
 export async function createDataSource(input: DataSourceInput, user: AuthenticatedUser) {

@@ -35,6 +35,8 @@ Phase 4 provides a persistent guided wizard, responsive block canvas, published 
 
 AI runs only from server routes and reads `AI_PROVIDER`, `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY` from `.env`. Never expose `AI_API_KEY` through a public environment variable. See [Phase 4 architecture and operations](docs/phase-4-guided-dashboard-builder.md).
 
+Published dashboards and approved/certified KPIs are immutable. Use **Create new version** to open an editable draft; existing dashboards continue using their locked KPI and Business Context versions.
+
 ```bash
 npm run db:migrate
 npm run lint

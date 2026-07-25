@@ -8,10 +8,12 @@ const id = "11111111-1111-4111-8111-111111111111";
 describe("Phase 4 dashboard governance", () => {
   it("maps existing roles to builder, reviewer, publisher, and viewer capabilities", () => {
     expect(hasPermission("DASHBOARD_CREATOR", "EDIT_DASHBOARD")).toBe(true);
+    expect(hasPermission("DASHBOARD_CREATOR", "DELETE_DASHBOARD")).toBe(true);
     expect(hasPermission("DASHBOARD_CREATOR", "PUBLISH_DASHBOARD")).toBe(false);
     expect(hasPermission("ADMIN", "REVIEW_DASHBOARD")).toBe(true);
     expect(hasPermission("ADMIN", "PUBLISH_DASHBOARD")).toBe(true);
     expect(hasPermission("VIEWER", "EDIT_DASHBOARD")).toBe(false);
+    expect(hasPermission("VIEWER", "DELETE_DASHBOARD")).toBe(false);
   });
   it("enforces the dashboard lifecycle", () => {
     expect(canTransitionDashboard("DRAFT", "READY_FOR_REVIEW")).toBe(true);
