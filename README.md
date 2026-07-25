@@ -29,6 +29,20 @@ npm run db:migrate
 
 Oracle connections use node-oracledb Thin Mode with bounded per-data-source pools. Data source accounts should be read-only and only receive `CREATE SESSION` plus `SELECT` access to the required application objects and Oracle `ALL_*` metadata views. Avoid `SELECT ANY TABLE` unless separately approved.
 
+## Phase 4: Guided Dashboard Builder
+
+Phase 4 provides a persistent guided wizard, responsive block canvas, published Business Context and KPI locking, structured query plans, safe Oracle previews, validation, AI recommendations with explicit acceptance, review, versioning, and immutable publication snapshots.
+
+AI runs only from server routes and reads `AI_PROVIDER`, `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY` from `.env`. Never expose `AI_API_KEY` through a public environment variable. See [Phase 4 architecture and operations](docs/phase-4-guided-dashboard-builder.md).
+
+```bash
+npm run db:migrate
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
 ## Reverse proxy deployment
 
 For production behind Nginx or another reverse proxy, configure the public URL as an allowed origin and preserve the original host and protocol. This keeps CSRF protection enabled for API requests.

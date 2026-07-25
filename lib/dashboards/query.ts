@@ -40,9 +40,9 @@ export async function generateBlockQuery(block: typeof dashboardBlocks.$inferSel
 }
 
 let activePreviews = 0;
-export async function previewDashboardBlock(blockId: string, user: AuthenticatedUser) {
+export async function previewDashboardBlock(dashboardId: string, blockId: string, user: AuthenticatedUser) {
   const block = (await db.select().from(dashboardBlocks).where(eq(dashboardBlocks.id, blockId)).limit(1))[0]; if (!block) throw new HttpError(404, "Dashboard block not found", "NOT_FOUND");
-  const version = (await db.select().from(dashboardVersions).where(eq(dashboardVersions.id, block.dashboardVersionId)).limit(1))[0]; if (!version) throw new HttpError(404, "Dashboard version not found", "NOT_FOUND");
+  const version = (await db.select().from(dashboardVersions).where(and(eq(dashboardVersions.id, block.dashboardVersionId), eq(dashboardVersions.dashboardId, dashboardId))).limit(1))[0]; if (!version) throw new HttpError(404, "Dashboard block not found", "NOT_FOUND");
   await requireDashboardDataSource(user, version.dataSourceId); if (activePreviews >= 3) throw new HttpError(429, "Dashboard preview concurrency limit reached", "QUERY_LIMIT");
   const generated = await generateBlockQuery(block, version, 100); const source = await getDataSource(version.dataSourceId); if (!source) throw new HttpError(404, "Data source not found", "NOT_FOUND");
   activePreviews += 1; const started = Date.now();

@@ -1,6 +1,6 @@
-import { and, eq, isNull, or } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { dashboards } from "@/lib/db/schema";
+import { dashboardPublications, dashboards } from "@/lib/db/schema";
 import { hasPermission, type Permission } from "@/lib/auth/permissions";
 import type { AuthenticatedUser } from "@/lib/auth/session";
 import { requireDataSourceAccess } from "@/lib/data-sources/service";
@@ -12,7 +12,14 @@ export async function requireDashboardAccess(user: AuthenticatedUser, dashboardI
   if (!dashboard) throw new HttpError(404, "Dashboard not found", "NOT_FOUND");
   if (mode === "VIEW") {
     requireDashboardRole(user, "VIEW_DASHBOARD");
-    if (user.role !== "ADMIN" && dashboard.visibility === "PRIVATE" && dashboard.ownerUserId !== user.id) throw new HttpError(403, "Dashboard access denied", "FORBIDDEN");
+    if (user.role !== "ADMIN" && dashboard.ownerUserId !== user.id) {
+      if (dashboard.status !== "PUBLISHED" || dashboard.visibility === "PRIVATE") throw new HttpError(403, "Dashboard access denied", "FORBIDDEN");
+      if (dashboard.visibility === "ROLE") {
+        const publication = (await db.select({ allowedRolesJson: dashboardPublications.allowedRolesJson }).from(dashboardPublications).where(eq(dashboardPublications.dashboardVersionId, dashboard.currentPublishedVersionId!)).limit(1))[0];
+        const allowedRoles = JSON.parse(publication?.allowedRolesJson || "[]") as string[];
+        if (!allowedRoles.includes(user.role)) throw new HttpError(403, "Dashboard access denied for this role", "FORBIDDEN");
+      }
+    }
   } else if (mode === "EDIT") {
     requireDashboardRole(user, "EDIT_DASHBOARD");
     if (user.role !== "ADMIN" && dashboard.ownerUserId !== user.id) throw new HttpError(403, "Only the owner or an administrator can edit this dashboard", "FORBIDDEN");
