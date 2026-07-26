@@ -9,6 +9,8 @@ import {
 } from "@/lib/db/schema";
 import type { AuthenticatedUser } from "@/lib/auth/session";
 import { HttpError } from "@/lib/http";
+import { previewTable } from "@/lib/data-sources/preview";
+import { requireDataSourceAccess } from "@/lib/data-sources/service";
 import { requireBusinessContextPermission, assertEditable, maySeePhysicalMetadata } from "./permissions";
 import { collectFormulaFieldIds, type FormulaNode } from "./formula";
 
@@ -117,6 +119,26 @@ export async function listBusinessObjectFields(objectId: string, user: Authentic
   await getBusinessObject(objectId, user); const rows = await db.select().from(businessFields).where(and(eq(businessFields.businessObjectId, objectId), isNull(businessFields.deletedAt))).orderBy(asc(businessFields.businessName)); if (maySeePhysicalMetadata(user)) return rows.map((item) => omit(item, ["exampleValues"] as const)); return rows.filter((item) => item.approvalStatus === "APPROVED" && item.visibleToDashboardCreator).map((item) => omit(item, ["physicalColumnName", "physicalColumnId", "physicalDataType", "exampleValues"] as const));
 }
 
+export async function getBusinessFieldSample(id: string, user: AuthenticatedUser) {
+  const field = (await db.select().from(businessFields).where(and(eq(businessFields.id, id), isNull(businessFields.deletedAt))).limit(1))[0];
+  if (!field) throw new HttpError(404, "Business Field not found", "NOT_FOUND");
+  await requireBusinessContextPermission(user, field.dataSourceId, "KPI_VIEW");
+  await requireDataSourceAccess(user, field.dataSourceId, "PREVIEW_DATA");
+  const object = (await db.select({ physicalTableId: businessObjects.physicalTableId }).from(businessObjects).where(and(eq(businessObjects.id, field.businessObjectId), eq(businessObjects.modelId, field.modelId), isNull(businessObjects.deletedAt))).limit(1))[0];
+  if (!object) throw new HttpError(404, "Business Object not found", "NOT_FOUND");
+  const preview = await previewTable(field.dataSourceId, object.physicalTableId, 5);
+  const column = preview.columns.find((item) => item.name === field.physicalColumnName);
+  if (!column) return { values: [] as unknown[], masked: field.sensitivityClassification !== "NONE" };
+  const values = preview.rows.map((row) => {
+    const value = row[field.physicalColumnName];
+    if (value == null) return "";
+    if (value instanceof Date) return value.toISOString();
+    if (typeof value === "object") { try { return JSON.stringify(value).slice(0, 120); } catch { return String(value).slice(0, 120); } }
+    return String(value).slice(0, 120);
+  });
+  return { values, masked: field.sensitivityClassification !== "NONE" || column.sensitivityType !== "NONE" };
+}
+
 export async function createBusinessField(objectId: string, input: { physicalColumnId: string; businessName: string; description?: string; businessType?: typeof businessFields.$inferInsert.businessType; fieldRole?: typeof businessFields.$inferInsert.fieldRole; aggregationRule?: typeof businessFields.$inferInsert.aggregationRule }, user: AuthenticatedUser) {
   const object = (await db.select().from(businessObjects).where(and(eq(businessObjects.id, objectId), isNull(businessObjects.deletedAt))).limit(1))[0]; if (!object) throw new HttpError(404, "Business Object not found", "NOT_FOUND"); const model = await requireModel(object.modelId); await requireBusinessContextPermission(user, object.dataSourceId, "BUSINESS_FIELD_MANAGE"); assertEditable(model.status); const column = (await db.select().from(dataSourceColumns).where(eq(dataSourceColumns.id, input.physicalColumnId)).limit(1))[0]; const table = (await db.select().from(dataSourceTables).where(eq(dataSourceTables.id, object.physicalTableId)).limit(1))[0]; if (!column || !table || column.tableId !== table.id) throw new HttpError(400, "Physical column does not belong to the Business Object", "SCOPE_MISMATCH"); const timestamp = now(); const id = randomUUID(); const overrides = omit(input, ["physicalColumnId"] as const); await db.insert(businessFields).values({ id, modelId: object.modelId, dataSourceId: object.dataSourceId, businessObjectId: object.id, physicalColumnId: column.id, physicalColumnName: column.columnName, physicalDataType: column.dataType, nullable: column.nullable, isPrimaryKey: column.isPrimaryKey, isForeignKey: column.isForeignKey, ...inferField(column), ...overrides, createdBy: user.id, updatedBy: user.id, createdAt: timestamp, updatedAt: timestamp }); return (await db.select().from(businessFields).where(eq(businessFields.id, id)).limit(1))[0];
 }
@@ -132,6 +154,25 @@ export async function updateBusinessField(id: string, changes: Partial<typeof bu
   const allowed = (({ businessName, description, businessType, fieldRole, aggregationRule, format, unit, currency, timeZone, dimensionGroup, sensitivityClassification, maskingRule, aiUsageAllowed, filterable, groupable, sortable, searchable, visibleToDashboardCreator, approvalStatus }) => ({ businessName, description, businessType, fieldRole, aggregationRule, format, unit, currency, timeZone, dimensionGroup, sensitivityClassification, maskingRule, aiUsageAllowed, filterable, groupable, sortable, searchable, visibleToDashboardCreator, approvalStatus }))(changes);
   await db.update(businessFields).set({ ...allowed, version: item.version + 1, updatedBy: user.id, updatedAt: now() }).where(eq(businessFields.id, id));
   return (await db.select().from(businessFields).where(eq(businessFields.id, id)).limit(1))[0];
+}
+
+export async function archiveBusinessFields(modelId: string, fieldIds: string[], user: AuthenticatedUser) {
+  const model = await requireModel(modelId);
+  await requireBusinessContextPermission(user, model.dataSourceId, "BUSINESS_FIELD_MANAGE");
+  assertEditable(model.status);
+  const ids = [...new Set(fieldIds)];
+  const fields = await db.select({ id: businessFields.id }).from(businessFields).where(and(eq(businessFields.modelId, modelId), inArray(businessFields.id, ids), isNull(businessFields.deletedAt)));
+  if (fields.length !== ids.length) throw new HttpError(400, "One or more Business Fields are outside this model or already removed", "SCOPE_MISMATCH");
+  const [relationships, sources, filters, defaultDateObjects] = await Promise.all([
+    db.select({ id: businessRelationships.id }).from(businessRelationships).where(and(isNull(businessRelationships.deletedAt), or(inArray(businessRelationships.sourceFieldId, ids), inArray(businessRelationships.targetFieldId, ids)))),
+    db.select({ id: kpiSourceFields.id }).from(kpiSourceFields).where(and(inArray(kpiSourceFields.businessFieldId, ids), isNull(kpiSourceFields.deletedAt))),
+    db.select({ id: kpiFilters.id }).from(kpiFilters).where(and(inArray(kpiFilters.businessFieldId, ids), isNull(kpiFilters.deletedAt))),
+    db.select({ id: businessObjects.id }).from(businessObjects).where(and(eq(businessObjects.modelId, modelId), inArray(businessObjects.defaultDateFieldId, ids), isNull(businessObjects.deletedAt))),
+  ]);
+  if (relationships.length || sources.length || filters.length || defaultDateObjects.length) throw new HttpError(409, `Cannot remove fields that are still used by relationships, KPI definitions, filters, or default-date settings`, "FIELD_IN_USE");
+  const timestamp = now();
+  await db.transaction(async (tx) => { await tx.update(businessFields).set({ deletedAt: timestamp, updatedAt: timestamp, updatedBy: user.id }).where(and(eq(businessFields.modelId, modelId), inArray(businessFields.id, ids))); });
+  return { removedCount: ids.length, fieldIds: ids };
 }
 
 export async function createBusinessRelationship(modelId: string, input: { sourceObjectId: string; sourceFieldId: string; targetObjectId: string; targetFieldId: string; joinType: "INNER" | "LEFT" | "RIGHT"; cardinality: "ONE_TO_ONE" | "ONE_TO_MANY" | "MANY_TO_ONE" | "MANY_TO_MANY" | "UNKNOWN"; direction?: "BIDIRECTIONAL" | "SOURCE_TO_TARGET" | "TARGET_TO_SOURCE"; isRequired?: boolean; confidenceScore?: number; sourceType?: "DATABASE_CONSTRAINT" | "AI_SUGGESTED" | "MANUAL" | "COLUMN_PATTERN"; notes?: string }, user: AuthenticatedUser) {
@@ -174,7 +215,7 @@ export async function createKpi(input: { modelId: string; code: string; name: st
   return getKpi(id, user);
 }
 
-async function persistFormulaNodes(kpiId: string, root: FormulaNode, userId: string, timestamp: Date) {
+function buildFormulaNodeRows(kpiId: string, root: FormulaNode, userId: string, timestamp: Date) {
   const rows: Array<typeof kpiFormulaNodes.$inferInsert> = [];
   const walk = (node: FormulaNode, parentNodeId: string | null, sortOrder: number) => {
     const id = randomUUID();
@@ -184,7 +225,13 @@ async function persistFormulaNodes(kpiId: string, root: FormulaNode, userId: str
     if (node.type === "arithmetic") children.push(node.left, node.right); else if (node.type === "aggregate" || node.type === "period") children.push(node.expression); else if (node.type === "ratio" || node.type === "percentage") children.push(node.numerator, node.denominator); else if (node.type === "conditional") children.push(node.condition.left, node.condition.right, node.whenTrue, node.whenFalse); else if (node.type === "date_difference") children.push(node.start, node.end); else if (node.type === "growth_rate" || node.type === "variance") children.push(node.current, node.comparison); else if (node.type === "custom") children.push(...node.arguments);
     children.forEach((child, index) => walk(child, id, index));
   };
-  walk(root, null, 0); if (rows.length) await db.insert(kpiFormulaNodes).values(rows);
+  walk(root, null, 0);
+  return rows;
+}
+
+async function persistFormulaNodes(kpiId: string, root: FormulaNode, userId: string, timestamp: Date) {
+  const rows = buildFormulaNodeRows(kpiId, root, userId, timestamp);
+  if (rows.length) await db.insert(kpiFormulaNodes).values(rows);
 }
 
 export async function getKpi(id: string, user: AuthenticatedUser) {
@@ -323,8 +370,20 @@ export async function updateKpi(id: string, changes: Partial<Omit<Parameters<typ
   let formulaFields: Array<typeof businessFields.$inferSelect> = [];
   if (changes.formulaAst) { const ids = [...collectFormulaFieldIds(changes.formulaAst)]; formulaFields = ids.length ? await db.select().from(businessFields).where(and(inArray(businessFields.id, ids), isNull(businessFields.deletedAt))) : []; if (formulaFields.length !== ids.length || formulaFields.some((field) => field.modelId !== item.modelId)) throw new HttpError(400, "KPI formula contains fields outside the model", "SCOPE_MISMATCH"); }
   const mapped = { ...changes, tags: changes.tags ? json(changes.tags) : undefined, formulaAst: changes.formulaAst ? json(changes.formulaAst) : undefined, dateLogic: changes.dateLogic ? json(changes.dateLogic) : undefined, divisionByZeroHandling: changes.divisionByZeroHandling };
-  await db.update(kpiDefinitions).set({ ...mapped, version: item.version + 1, updatedBy: user.id, updatedAt: timestamp }).where(eq(kpiDefinitions.id, id));
-  if (changes.formulaAst) { await db.update(kpiFormulaNodes).set({ deletedAt: timestamp, updatedAt: timestamp, updatedBy: user.id }).where(and(eq(kpiFormulaNodes.kpiId, id), isNull(kpiFormulaNodes.deletedAt))); await db.update(kpiSourceFields).set({ deletedAt: timestamp }).where(and(eq(kpiSourceFields.kpiId, id), isNull(kpiSourceFields.deletedAt))); if (formulaFields.length) await db.insert(kpiSourceFields).values(formulaFields.map((field) => ({ id: randomUUID(), kpiId: id, businessObjectId: field.businessObjectId, businessFieldId: field.id, role: field.id === changes.defaultDateFieldId ? "DATE" as const : field.fieldRole === "MEASURE" ? "MEASURE" as const : "DIMENSION" as const, createdBy: user.id, createdAt: timestamp }))); await persistFormulaNodes(id, changes.formulaAst, user.id, timestamp); }
+  await db.transaction(async (tx) => {
+    await tx.update(kpiDefinitions).set({ ...mapped, version: item.version + 1, updatedBy: user.id, updatedAt: timestamp }).where(eq(kpiDefinitions.id, id));
+    if (!changes.formulaAst) return;
+    await tx.update(kpiFormulaNodes).set({ deletedAt: timestamp, updatedAt: timestamp, updatedBy: user.id }).where(and(eq(kpiFormulaNodes.kpiId, id), isNull(kpiFormulaNodes.deletedAt)));
+    await tx.update(kpiSourceFields).set({ deletedAt: timestamp }).where(and(eq(kpiSourceFields.kpiId, id), isNull(kpiSourceFields.deletedAt)));
+    for (const field of formulaFields) {
+      const role = field.id === changes.defaultDateFieldId ? "DATE" as const : field.fieldRole === "MEASURE" ? "MEASURE" as const : "DIMENSION" as const;
+      const existing = (await tx.select().from(kpiSourceFields).where(and(eq(kpiSourceFields.kpiId, id), eq(kpiSourceFields.businessFieldId, field.id), eq(kpiSourceFields.role, role))).limit(1))[0];
+      if (existing) await tx.update(kpiSourceFields).set({ deletedAt: null, version: existing.version + 1 }).where(eq(kpiSourceFields.id, existing.id));
+      else await tx.insert(kpiSourceFields).values({ id: randomUUID(), kpiId: id, businessObjectId: field.businessObjectId, businessFieldId: field.id, role, createdBy: user.id, createdAt: timestamp });
+    }
+    const formulaRows = buildFormulaNodeRows(id, changes.formulaAst, user.id, timestamp);
+    if (formulaRows.length) await tx.insert(kpiFormulaNodes).values(formulaRows);
+  });
   return getKpi(id, user);
 }
 
