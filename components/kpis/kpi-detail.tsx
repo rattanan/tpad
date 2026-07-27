@@ -10,7 +10,9 @@ type Formula = { type: string; businessFieldId?: string; value?: unknown; functi
 type SourceField = { id: string; businessFieldId: string; role: string };
 type AvailableField = BusinessFieldOption;
 type EditState = { name: string; description: string; businessObjective: string; businessQuestion: string; measureType: string; aggregation: string; fieldId: string; nullHandling: string; divisionByZeroHandling: string; decimalPrecision: string; unit: string; currency: string; recommendedVisualization: string; displayFormat: string };
-type Kpi = { id: string; code: string; name: string; description: string | null; businessObjective: string | null; businessQuestion: string | null; measureType: string; formulaAst?: Formula; nullHandling?: string; divisionByZeroHandling?: string; decimalPrecision?: number; unit?: string | null; currency?: string | null; status: string; certificationStatus: string; version: number; recommendedVisualization?: string | null; displayFormat?: string | null; sourceFields?: SourceField[]; versions?: Array<{ id: string; versionNumber: number; status: string; changeReason: string | null; approvedAt: string | null; createdAt: string }> };
+type ValidationIssue = { ruleCode: string; severity: "INFO" | "WARNING" | "ERROR"; message: string; suggestedFix?: string | null };
+type ValidationResult = { outcome: "FAILED" | "PASSED_WITH_WARNING" | "PASSED"; validatedAt?: string; version?: number; issues: ValidationIssue[] };
+type Kpi = { id: string; modelId: string; code: string; name: string; description: string | null; businessObjective: string | null; businessQuestion: string | null; measureType: string; formulaAst?: Formula; nullHandling?: string; divisionByZeroHandling?: string; decimalPrecision?: number; unit?: string | null; currency?: string | null; status: string; certificationStatus: string; version: number; recommendedVisualization?: string | null; displayFormat?: string | null; sourceFields?: SourceField[]; latestValidation?: ValidationResult | null; versions?: Array<{ id: string; versionNumber: number; status: string; changeReason: string | null; approvedAt: string | null; createdAt: string }> };
 type Lineage = { nodes: Array<{ id: string; type: string; label: string; physical?: string }>; edges: Array<{ source: string; target: string }> };
 
 const draftStatuses = ["DRAFT", "CHANGES_REQUESTED"];
@@ -24,7 +26,9 @@ export default function KpiDetail({ kpiJson, fieldsJson, role }: { kpiJson: stri
   const [tab, setTab] = useState("Definition");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  const [validation, setValidation] = useState<ValidationResult | null>(kpi.latestValidation ?? null);
   const [lineage, setLineage] = useState<Lineage | null>(null);
   const simpleFormula = Boolean(fieldFromFormula(kpi.formulaAst));
   const [edit, setEdit] = useState({
@@ -36,23 +40,34 @@ export default function KpiDetail({ kpiJson, fieldsJson, role }: { kpiJson: stri
   const [test, setTest] = useState({ expectedResult: "", tolerance: "0" });
   const canManage = role === "ADMIN" || role === "DATA_SOURCE_CREATOR";
   const editable = canManage && draftStatuses.includes(kpi.status);
+  const validationPassed = validation?.outcome === "PASSED" || validation?.outcome === "PASSED_WITH_WARNING";
 
   async function post(path: string, label: string, body: object = {}) {
-    setBusy(label); setError("");
+    setBusy(label); setError(""); setNotice("");
     const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await response.json(); setBusy("");
     if (!response.ok) { setError(data.error ?? "Action failed"); return null; }
-    setResult(data); router.refresh(); return data;
+    if (label === "Create draft") setValidation(null);
+    setNotice(`${label} completed`); router.refresh(); return data;
   }
+  async function runValidation() {
+    const data = await post(`/api/kpis/${kpi.id}/validate`, "Validation") as ValidationResult | null;
+    setTab("Validation");
+    if (!data) return;
+    setValidation(data);
+    if (data.outcome === "FAILED") { setNotice(""); setError("Validation failed. Fix the issues below before submitting this KPI for review."); }
+    else setNotice(data.outcome === "PASSED_WITH_WARNING" ? "Validation passed with warnings" : "Validation passed");
+  }
+  async function verifyResult() { const data = await post(`/api/kpis/${kpi.id}/test`, "Verify result", test); if (data) setResult(data); }
   async function saveDraft() {
-    setBusy("Save KPI"); setError("");
+    setBusy("Save KPI"); setError(""); setNotice("");
     const formulaAst = simpleFormula && edit.fieldId ? { type: "aggregate", function: edit.aggregation, expression: { type: "field", businessFieldId: edit.fieldId } } : undefined;
     const { aggregation: _aggregation, fieldId: _fieldId, ...changes } = edit;
     void _aggregation; void _fieldId;
     const response = await fetch(`/api/kpis/${kpi.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...changes, decimalPrecision: Number(edit.decimalPrecision), formulaAst }) });
     const data = await response.json(); setBusy("");
     if (!response.ok) { setError(data.error ?? "Save failed"); return; }
-    setResult(data); router.refresh();
+    setValidation(null); setNotice("KPI draft saved successfully"); router.refresh();
   }
   async function loadLineage() {
     setBusy("Lineage"); const response = await fetch(`/api/kpis/${kpi.id}/lineage`); const data = await response.json(); setBusy("");
@@ -62,14 +77,15 @@ export default function KpiDetail({ kpiJson, fieldsJson, role }: { kpiJson: stri
   const tabs = ["Definition", "Validation", "Lineage", "Version history"];
   return <main className="bc-workspace">
     <header className="bc-model-head kpi-detail-head"><div><Link href="/kpi-catalogue">← KPI Catalogue</Link><div className="bc-title-line"><span className="kpi-code">{kpi.code}</span><h1>{kpi.name}</h1>{badge(kpi.status)}</div><p>{kpi.description || "Business description pending."}</p><small>Version {kpi.version} · {kpi.certificationStatus.replaceAll("_", " ")}</small></div>
-      <div className="bc-actions">{canManage && ["APPROVED", "CERTIFIED"].includes(kpi.status) && <button className="primary-button" onClick={() => { const reason = window.prompt("Change summary for this editable draft"); if (reason !== null) void post(`/api/kpis/${kpi.id}/create-version`, "Create draft", { changeSummary: reason }); }}>Create editable draft</button>}{canManage && <button className="secondary-button" onClick={async () => { await post(`/api/kpis/${kpi.id}/validate`, "Validation"); setTab("Validation"); }}>Validate</button>}{canManage && draftStatuses.includes(kpi.status) && <button className="primary-button" onClick={() => void post(`/api/kpis/${kpi.id}/submit-review`, "Submit review")}>Submit review</button>}{role === "ADMIN" && kpi.status === "UNDER_REVIEW" && <button className="primary-button" onClick={() => void post(`/api/kpis/${kpi.id}/approve`, "Approve")}>Approve</button>}{role === "ADMIN" && kpi.status === "APPROVED" && <button className="primary-button" onClick={() => void post(`/api/kpis/${kpi.id}/certify`, "Certify")}>Certify</button>}</div>
+      <div className="bc-actions">{canManage && ["APPROVED", "CERTIFIED"].includes(kpi.status) && <button className="primary-button" onClick={() => { const reason = window.prompt("Change summary for this editable draft"); if (reason !== null) void post(`/api/kpis/${kpi.id}/create-version`, "Create draft", { changeSummary: reason }); }}>Create editable draft</button>}{canManage && <button className="secondary-button" disabled={Boolean(busy) || !editable} onClick={() => void runValidation()}>{busy === "Validation" && <span className="button-spinner" />}{busy === "Validation" ? "Validating…" : "Validate"}</button>}{canManage && draftStatuses.includes(kpi.status) && <button className="primary-button" disabled={Boolean(busy) || !validationPassed} title={validationPassed ? "Submit this validated KPI for review" : "Validation must pass before review"} onClick={() => void post(`/api/kpis/${kpi.id}/submit-review`, "Submit review")}>Submit review</button>}{role === "ADMIN" && kpi.status === "UNDER_REVIEW" && <button className="primary-button" onClick={() => void post(`/api/kpis/${kpi.id}/approve`, "Approve")}>Approve</button>}{role === "ADMIN" && kpi.status === "APPROVED" && <button className="primary-button" onClick={() => void post(`/api/kpis/${kpi.id}/certify`, "Certify")}>Certify</button>}</div>
     </header>
-    {error && <div className="bc-alert error">{error}</div>}
+    {error && <div className="bc-alert error" role="alert">{error}</div>}
+    {notice && <div className="bc-alert success" role="status">{notice}</div>}
     <nav className="bc-tabs" aria-label="KPI sections">{tabs.map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}</nav>
     <section className="bc-tab-panel">
       {tab === "Definition" && (editable ? <EditVersion edit={edit} setEdit={setEdit} fields={fields} simpleFormula={simpleFormula} busy={busy} saveDraft={saveDraft} /> : <DefinitionView kpi={kpi} fields={fields} />)}
       {tab === "Version history" && <section><div className="bc-section-head"><div><p className="eyebrow">IMMUTABLE SNAPSHOTS</p><h2>KPI version history</h2></div></div><div className="mapping-list">{kpi.versions?.map((item) => <article key={item.id}><div><strong>Version {item.versionNumber}</strong><small>{item.changeReason || "Approved KPI snapshot"}</small></div>{badge(item.status)}<time>{new Date(item.approvedAt || item.createdAt).toLocaleString()}</time></article>)}{!kpi.versions?.length && <div className="workspace-empty"><strong>No approved version snapshots</strong><p>A snapshot is created when the KPI is approved.</p></div>}</div></section>}
-      {tab === "Validation" && <section className="test-lab"><div><p className="eyebrow">VALIDATE AND VERIFY</p><h2>Definition checks</h2><p>Validation checks the KPI definition. An optional result check compares the live KPI value with your expected value; it never changes the KPI.</p></div>{canManage && <div className="test-form verification-form"><label>Expected result <input value={test.expectedResult} onChange={(event) => setTest({ ...test, expectedResult: event.target.value })} inputMode="decimal" placeholder="Optional, e.g. 1250" /><small>Leave blank to run without a pass/fail comparison.</small></label><label>Tolerance <input value={test.tolerance} onChange={(event) => setTest({ ...test, tolerance: event.target.value })} inputMode="decimal" /><small>Allowed difference from the expected result.</small></label><button className="secondary-button" disabled={Boolean(busy)} onClick={() => void post(`/api/kpis/${kpi.id}/test`, "Verify result", test)}>Verify result</button></div>}{result && <pre className="result-preview">{JSON.stringify(result, null, 2)}</pre>}</section>}
+      {tab === "Validation" && <section className="test-lab"><div className="kpi-validation-heading"><div><p className="eyebrow">VALIDATE AND VERIFY</p><h2>Definition checks</h2><p>Validation checks the KPI definition. An optional result check compares the live KPI value with your expected value; it never changes the KPI.</p></div>{validation && badge(validation.outcome)}</div>{validation ? <section className={`kpi-validation-result ${validation.outcome.toLowerCase()}`} aria-live="polite"><header><div><strong>{validation.outcome === "FAILED" ? "Validation failed" : validation.outcome === "PASSED_WITH_WARNING" ? "Passed with warnings" : "Validation passed"}</strong><small>Version {validation.version ?? kpi.version}{validation.validatedAt ? ` · ${new Date(validation.validatedAt).toLocaleString()}` : ""}</small></div>{validation.outcome === "FAILED" && <Link className="secondary-button" href={`/business-context-models/${kpi.modelId}`}>Open Business Context</Link>}</header><div className="validation-list">{validation.issues.map((issue, index) => <article className={issue.severity.toLowerCase()} key={`${issue.ruleCode}-${index}`}><span>{issue.severity}</span><div><strong>{issue.ruleCode.replaceAll("_", " ")}</strong><p>{issue.message}</p>{issue.suggestedFix && <small>{issue.suggestedFix}</small>}</div></article>)}</div></section> : <div className="workspace-empty kpi-validation-empty"><span>✓</span><strong>Not validated yet</strong><p>Run Validate before submitting this KPI version for review.</p></div>}{canManage && <div className="test-form verification-form"><label>Expected result <input value={test.expectedResult} onChange={(event) => setTest({ ...test, expectedResult: event.target.value })} inputMode="decimal" placeholder="Optional, e.g. 1250" /><small>Leave blank to run without a pass/fail comparison.</small></label><label>Tolerance <input value={test.tolerance} onChange={(event) => setTest({ ...test, tolerance: event.target.value })} inputMode="decimal" /><small>Allowed difference from the expected result.</small></label><button className="secondary-button" disabled={Boolean(busy)} onClick={() => void verifyResult()}>{busy === "Verify result" ? "Verifying…" : "Verify result"}</button></div>}{result && <pre className="result-preview">{JSON.stringify(result, null, 2)}</pre>}</section>}
       {tab === "Lineage" && <section><div className="bc-section-head"><div><p className="eyebrow">END-TO-END TRACEABILITY</p><h2>Source metadata → KPI</h2></div><button className="secondary-button" onClick={() => void loadLineage()}>{busy === "Lineage" ? "Loading…" : "Load lineage"}</button></div>{lineage ? <div className="lineage-flow">{lineage.nodes.map((node, index) => <div key={node.id}><article><span>{node.type.replaceAll("_", " ")}</span><strong>{node.label}</strong>{node.physical && <small>{node.physical}</small>}</article>{index < lineage.nodes.length - 1 && <b>→</b>}</div>)}</div> : <div className="workspace-empty"><span>⌁</span><strong>Load governed lineage</strong><p>Viewer-safe projections hide physical table and column names.</p></div>}</section>}
     </section>
   </main>;

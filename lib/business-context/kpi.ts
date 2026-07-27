@@ -8,7 +8,7 @@ import { withOracleConnection } from "@/lib/data-sources/oracle";
 import { HttpError } from "@/lib/http";
 import { collectFormulaFieldIds, formulaNodeSchema, validateFormulaTypes, type FormulaFilter, type FormulaNode } from "./formula";
 import { maySeeGeneratedSql, requireBusinessContextPermission } from "./permissions";
-import { requireModel } from "./service";
+import { requireModel, transitionKpi } from "./service";
 import { assertReadOnlySql } from "./security";
 export { assertReadOnlySql } from "./security";
 
@@ -70,6 +70,73 @@ export async function validateKpi(kpiId: string, user: AuthenticatedUser) {
   if (!issues.length) issues.push({ ruleCode: "KPI_VALID", severity: "INFO", message: "KPI definition passed all validation rules." }); const outcome: "FAILED" | "PASSED_WITH_WARNING" | "PASSED" = issues.some((item) => item.severity === "ERROR") ? "FAILED" : issues.some((item) => item.severity === "WARNING") ? "PASSED_WITH_WARNING" : "PASSED"; const timestamp = new Date();
   await db.insert(kpiValidationResults).values(issues.map((issue) => ({ id: randomUUID(), kpiId, result: outcome, ...issue, validatedBy: user.id, validatedAt: timestamp, version: kpi.version, createdAt: timestamp })));
   if (outcome !== "FAILED") await db.update(kpiDefinitions).set({ certificationStatus: "TECHNICALLY_VALIDATED", updatedBy: user.id, updatedAt: timestamp }).where(eq(kpiDefinitions.id, kpiId)); return { outcome, issues };
+}
+
+export type AutoCertifyKpiResult = {
+  id: string;
+  name: string;
+  result: "CERTIFIED" | "ALREADY_CERTIFIED" | "SKIPPED";
+  validationOutcome?: "FAILED" | "PASSED_WITH_WARNING" | "PASSED";
+  reason?: string;
+};
+
+export async function autoApproveAndCertifyKpis(modelId: string, user: AuthenticatedUser) {
+  const model = await requireModel(modelId);
+  if (user.role !== "ADMIN") throw new HttpError(403, "Only administrators can auto approve and certify KPIs", "FORBIDDEN");
+  await requireBusinessContextPermission(user, model.dataSourceId, "KPI_CERTIFY");
+
+  const candidates = await db.select({
+    id: kpiDefinitions.id,
+    name: kpiDefinitions.name,
+    status: kpiDefinitions.status,
+  }).from(kpiDefinitions).where(and(eq(kpiDefinitions.modelId, modelId), isNull(kpiDefinitions.deletedAt)));
+  const results: AutoCertifyKpiResult[] = [];
+
+  for (const candidate of candidates) {
+    if (candidate.status === "CERTIFIED") {
+      results.push({ id: candidate.id, name: candidate.name, result: "ALREADY_CERTIFIED" });
+      continue;
+    }
+    if (!(["DRAFT", "CHANGES_REQUESTED", "UNDER_REVIEW", "APPROVED"] as string[]).includes(candidate.status)) {
+      results.push({ id: candidate.id, name: candidate.name, result: "SKIPPED", reason: `Status ${candidate.status.replaceAll("_", " ")} is not eligible` });
+      continue;
+    }
+
+    try {
+      let status = candidate.status as "DRAFT" | "CHANGES_REQUESTED" | "UNDER_REVIEW" | "APPROVED" | "CERTIFIED";
+      let validationOutcome: AutoCertifyKpiResult["validationOutcome"];
+      if (status === "DRAFT" || status === "CHANGES_REQUESTED") {
+        const validation = await validateKpi(candidate.id, user);
+        validationOutcome = validation.outcome;
+        if (validation.outcome === "FAILED") {
+          const errors = validation.issues.filter((issue) => issue.severity === "ERROR").map((issue) => issue.message);
+          results.push({ id: candidate.id, name: candidate.name, result: "SKIPPED", validationOutcome, reason: errors.join(" · ") || "Validation failed" });
+          continue;
+        }
+        await transitionKpi(candidate.id, "SUBMIT", user, "Automatic governed KPI certification");
+        status = "UNDER_REVIEW";
+      }
+      if (status === "UNDER_REVIEW") {
+        await transitionKpi(candidate.id, "APPROVE", user, "Automatic governed KPI certification");
+        status = "APPROVED";
+      }
+      if (status === "APPROVED") {
+        await transitionKpi(candidate.id, "CERTIFY", user, "Automatic governed KPI certification");
+        status = "CERTIFIED";
+      }
+      results.push({ id: candidate.id, name: candidate.name, result: "CERTIFIED", validationOutcome });
+    } catch (error) {
+      results.push({ id: candidate.id, name: candidate.name, result: "SKIPPED", reason: error instanceof Error ? error.message : "Unable to certify KPI" });
+    }
+  }
+
+  return {
+    totalCount: candidates.length,
+    certifiedCount: results.filter((item) => item.result === "CERTIFIED").length,
+    alreadyCertifiedCount: results.filter((item) => item.result === "ALREADY_CERTIFIED").length,
+    skippedCount: results.filter((item) => item.result === "SKIPPED").length,
+    results,
+  };
 }
 
 let runningQueries = 0;
