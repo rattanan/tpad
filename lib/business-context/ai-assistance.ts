@@ -1,16 +1,18 @@
 import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { businessFields, businessObjects, dataSourceColumns, dataSourceTables, kpiDefinitions } from "@/lib/db/schema";
+import { businessFields, businessObjects, dataSourceColumns, dataSourceRelationships, dataSourceTables, kpiDefinitions } from "@/lib/db/schema";
 import type { AuthenticatedUser } from "@/lib/auth/session";
 import { HttpError } from "@/lib/http";
-import { checkColumnsHaveData, profileTableColumns } from "@/lib/data-sources/preview";
+import { profileTableColumns, profileTableColumnsAggregated } from "@/lib/data-sources/preview";
 import { assertEditable, requireBusinessContextPermission } from "./permissions";
 import { createBusinessObject, createKpi, requireModel, updateBusinessField } from "./service";
 import { sanitizeMetadataText } from "./security";
-import { findMeasureColumns, isLikelyMasterOnlyObject, normalizeObjectSuggestions } from "./object-suggestion";
+import { findMeasureColumns, normalizeObjectSuggestions } from "./object-suggestion";
 import { normalizeKpiSuggestions } from "./kpi-suggestion";
 import { classifyBusinessField, profileExclusionReasons, type ColumnProfile } from "./column-profile";
+import { aiRequestTimeoutMs } from "./ai-config";
+import { inferAnalyticalRole, interpretBusinessIntent, scoreIntentField, semanticRelevance } from "./business-intent";
 
 const descriptionSchema = z.object({ description: z.string().trim().min(10).max(600) }).strict();
 const kpiSuggestionSchema = z.object({ kpis: z.array(z.object({
@@ -29,7 +31,32 @@ const kpiAnalysisSchema = z.object({
   recommendedVisualizations: z.array(z.string().trim().max(255)).max(20).default([]), dataQualityWarnings: z.array(z.string().trim().max(500)).max(30).default([]),
 }).passthrough();
 
+const businessIntentAnalysisSchema = z.object({
+  businessDomain: z.string().trim().max(255).optional(),
+  businessObjective: z.string().trim().max(1000).optional(),
+  businessSummary: z.string().trim().max(1000).optional(),
+  businessQuestions: z.array(z.string().trim().max(500)).max(20).optional(),
+  dataCoverage: z.array(z.string().trim().max(255)).max(30).optional(),
+  warnings: z.array(z.string().trim().max(500)).max(30).optional(),
+}).strict();
+
 type AiBody = { output_text?: string; output?: Array<{ content?: Array<{ text?: string }> }>; choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } };
+
+export type KpiGenerationProgress = {
+  stage: "PREPARING_CONTEXT" | "PROFILING_DATA" | "CLASSIFYING_FIELDS" | "GENERATING_CANDIDATES" | "USING_FALLBACK" | "VALIDATING_CANDIDATES" | "SAVING_DRAFTS";
+  label: string;
+  detail: string;
+  percent: number;
+};
+
+export type BusinessObjectGenerationProgress = {
+  stage: "DISCOVERING_TABLES" | "CLASSIFYING_OBJECTS" | "GENERATING_CANDIDATES" | "USING_FALLBACK" | "VERIFYING_DATA" | "MAPPING_OBJECTS";
+  label: string;
+  detail: string;
+  percent: number;
+};
+
+type ProgressReporter = (progress: KpiGenerationProgress) => void;
 
 function aiConfig() {
   const apiKey = process.env.AI_API_KEY;
@@ -50,7 +77,7 @@ async function requestStructuredAi(system: string, context: unknown) {
   const config = aiConfig();
   if (!config) return null;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 45_000);
+  const timer = setTimeout(() => controller.abort(), aiRequestTimeoutMs());
   try {
     const useResponses = config.provider === "openai" || /api\.openai\.com/i.test(config.baseUrl);
     const response = await fetch(`${config.baseUrl}/${useResponses ? "responses" : "chat/completions"}`, {
@@ -63,7 +90,8 @@ async function requestStructuredAi(system: string, context: unknown) {
     if (!response.ok) throw new Error(body.error?.message || "AI provider request failed");
     return parseJson(responseText(body));
   } catch (error) {
-    throw new HttpError(502, error instanceof Error && error.name === "AbortError" ? "AI assistance timed out" : "AI assistance is temporarily unavailable", "AI_REQUEST_FAILED");
+    const timedOut = error instanceof Error && error.name === "AbortError";
+    throw new HttpError(502, timedOut ? "AI assistance timed out" : "AI assistance is temporarily unavailable", timedOut ? "AI_TIMEOUT" : "AI_REQUEST_FAILED");
   } finally { clearTimeout(timer); }
 }
 
@@ -76,10 +104,12 @@ function businessName(value: string) {
   return value.replace(/_TAB$/i, "").split("_").filter(Boolean).map((part) => part[0] + part.slice(1).toLowerCase()).join(" ");
 }
 
-export async function generateDraftBusinessObjectsWithAi(modelId: string, user: AuthenticatedUser) {
+export async function generateDraftBusinessObjectsWithAi(modelId: string, user: AuthenticatedUser, reportProgress?: (progress: BusinessObjectGenerationProgress) => void) {
+  reportProgress?.({ stage: "DISCOVERING_TABLES", label: "Discovering candidate tables and views", detail: "Loading synchronized metadata and excluding objects already mapped to this Business Context.", percent: 6 });
   const model = await requireModel(modelId);
   await requireBusinessContextPermission(user, model.dataSourceId, "BUSINESS_OBJECT_MANAGE");
   assertEditable(model.status);
+  const intent=interpretBusinessIntent(model.name,model.description);
   const [mapped, tables] = await Promise.all([
     // Include archived mappings: removing a generated object is also a decision
     // that the same physical table must not be suggested again automatically.
@@ -89,31 +119,53 @@ export async function generateDraftBusinessObjectsWithAi(modelId: string, user: 
   const mappedIds = new Set(mapped.map((item) => item.tableId));
   const unmapped = tables.filter((table) => !mappedIds.has(table.id)).slice(0, 240);
   if (!unmapped.length) throw new HttpError(409, "No unmapped tables or views are available in this Business Context schema", "NO_AVAILABLE_TABLES");
-  const columns = await db.select({ tableId: dataSourceColumns.tableId, columnName: dataSourceColumns.columnName, dataType: dataSourceColumns.dataType, isPrimaryKey: dataSourceColumns.isPrimaryKey, isForeignKey: dataSourceColumns.isForeignKey, sensitivityType: dataSourceColumns.sensitivityType }).from(dataSourceColumns).where(and(inArray(dataSourceColumns.tableId, unmapped.map((table) => table.id)), eq(dataSourceColumns.isIncluded, true), eq(dataSourceColumns.status, "ACTIVE")));
+  const [columns,physicalRelationships] = await Promise.all([db.select({ id:dataSourceColumns.id,tableId: dataSourceColumns.tableId, columnName: dataSourceColumns.columnName,businessName:dataSourceColumns.businessName,description:dataSourceColumns.description, dataType: dataSourceColumns.dataType, isPrimaryKey: dataSourceColumns.isPrimaryKey, isForeignKey: dataSourceColumns.isForeignKey, sensitivityType: dataSourceColumns.sensitivityType }).from(dataSourceColumns).where(and(inArray(dataSourceColumns.tableId, unmapped.map((table) => table.id)), eq(dataSourceColumns.isIncluded, true), eq(dataSourceColumns.status, "ACTIVE"))),db.select().from(dataSourceRelationships).where(eq(dataSourceRelationships.dataSourceId,model.dataSourceId))]);
   const columnsByTable = new Map<string, typeof columns>();
   for (const column of columns) columnsByTable.set(column.tableId, [...(columnsByTable.get(column.tableId) ?? []), column]);
-  const candidates = unmapped.filter((table) => !isLikelyMasterOnlyObject(table.tableName)).map((table) => ({ ...table, measureColumns: findMeasureColumns(columnsByTable.get(table.id) ?? []).slice(0, 20) })).filter((table) => table.measureColumns.length > 0);
+  reportProgress?.({ stage: "CLASSIFYING_OBJECTS", label: "Classifying business objects", detail: "Separating transactional and measurable objects from master, lookup, and configuration data.", percent: 24 });
+  const relationshipCounts=new Map<string,number>();for(const relation of physicalRelationships){relationshipCounts.set(relation.sourceTableId,(relationshipCounts.get(relation.sourceTableId)??0)+1);relationshipCounts.set(relation.targetTableId,(relationshipCounts.get(relation.targetTableId)??0)+1);}
+  const ranked=unmapped.map(table=>{const tableColumns=columnsByTable.get(table.id)??[];const relevanceScore=Math.min(100,semanticRelevance(intent,table.tableName,table.businessName,table.description,...tableColumns.flatMap(column=>[column.columnName,column.businessName,column.description]))+Math.min(20,(relationshipCounts.get(table.id)??0)*4));return{...table,relevanceScore,relationshipCount:relationshipCounts.get(table.id)??0,measureColumns:findMeasureColumns(tableColumns).slice(0,20),candidateColumns:tableColumns.filter(column=>column.sensitivityType==="NONE"&&!/BLOB|CLOB|LONG|XMLTYPE|RAW/i.test(column.dataType)).sort((a,b)=>(Number(b.isPrimaryKey||b.isForeignKey)-Number(a.isPrimaryKey||a.isForeignKey))||semanticRelevance(intent,b.columnName,b.businessName,b.description)-semanticRelevance(intent,a.columnName,a.businessName,a.description)).slice(0,40)};}).filter(table=>table.estimatedRowCount!==0&&table.candidateColumns.length>0).sort((a,b)=>b.relevanceScore-a.relevanceScore||b.measureColumns.length-a.measureColumns.length);
+  const candidates=(ranked.filter(table=>table.relevanceScore>=15).slice(0,12).length?ranked.filter(table=>table.relevanceScore>=15).slice(0,12):ranked.filter(table=>table.measureColumns.length).slice(0,12));
   const skippedNonMeasureCount = unmapped.length - candidates.length;
-  if (!candidates.length) throw new HttpError(409, "No unmapped tables or views with usable Measure fields are available; master-only objects were excluded", "NO_MEASURE_TABLES");
-  const safeContext = { context: { name: sanitizeMetadataText(model.name, 190), description: sanitizeMetadataText(model.description, 500) }, tables: candidates.map((table) => ({ id: table.id, name: table.tableName, businessName: sanitizeMetadataText(table.businessName, 255), description: sanitizeMetadataText(table.description, 500), type: table.objectType, rowCountKnownPositive: typeof table.estimatedRowCount === "number" ? table.estimatedRowCount > 0 : null, measureFields: table.measureColumns.map((column) => ({ name: sanitizeMetadataText(column.columnName, 128), dataType: column.dataType })) })) };
-  const generated = await requestStructuredAi("Select 1-8 transactional, event, snapshot, or aggregate physical tables/views relevant to the supplied Business Context and propose Draft Business Object metadata. Every listed candidate contains at least one server-detected Measure field. Reject Master Data, Reference Data, lookup, type, category, status, and configuration objects even when they contain numeric IDs or codes. Use only listed table IDs and measure fields as evidence. Do not invent tables, columns, row values, SQL, or business rules. Prefer candidates whose rowCountKnownPositive is true; the server will independently verify Measure data. Return JSON with key objects; each item has tableId, businessName, description, optional recordGrain, and objectType. Never return objectType MASTER_DATA or REFERENCE_DATA.", safeContext);
-  const fallback = { objects: candidates.filter((table) => table.estimatedRowCount !== 0).slice(0, 6).map((table) => ({ tableId: table.id, businessName: table.businessName || businessName(table.tableName), description: `${table.businessName || businessName(table.tableName)} contains measurable records relevant to ${model.name}.`, objectType: table.objectType === "VIEW" ? "VIEW" as const : "TRANSACTION" as const })) };
+  if (!candidates.length) throw new HttpError(409, "No populated tables or views contain fields relevant to this Business Context intent", "NO_RELEVANT_TABLES");
+  const safeContext = { intent, context: { name: sanitizeMetadataText(model.name, 190), description: sanitizeMetadataText(model.description, 500) }, tables: candidates.map((table) => ({ id: table.id, name: table.tableName, businessName: sanitizeMetadataText(table.businessName, 255), description: sanitizeMetadataText(table.description, 500), type: table.objectType, rowCountKnownPositive: typeof table.estimatedRowCount === "number" ? table.estimatedRowCount > 0 : null,relevanceScore:table.relevanceScore,relationshipCount:table.relationshipCount, fields: table.candidateColumns.map((column) => ({ id:column.id,name: sanitizeMetadataText(column.columnName, 128),businessName:sanitizeMetadataText(column.businessName,255),description:sanitizeMetadataText(column.description,300), dataType: column.dataType,primaryKey:column.isPrimaryKey,foreignKey:column.isForeignKey })) })) };
+  reportProgress?.({ stage: "GENERATING_CANDIDATES", label: "Generating Business Object candidates", detail: "AI is matching the Business Context meaning to measurable tables and views.", percent: 38 });
+  let generated: unknown = null;
+  let generationMode: "AI" | "RULE_BASED" | "TIMEOUT_FALLBACK" | "PROVIDER_FALLBACK" = aiConfig() ? "AI" : "RULE_BASED";
+  try {
+    generated = await requestStructuredAi("Interpret the supplied Model Name and Description as the primary business intent, then select 1-8 complementary tables/views that together cover the intent. Use table comments, column comments, data types, keys, relationship counts and server relevance scores; never choose from names alone and never invent metadata. Transaction, snapshot, master and reference objects are allowed only when they add necessary business coverage. Reject empty, technical-only, configuration and duplicate objects. Use only listed table IDs. Return JSON with {analysis,objects}; analysis may refine businessDomain,businessObjective,businessSummary,businessQuestions,dataCoverage,warnings. Each object has tableId,businessName,description,recordGrain,objectType,businessCategory,role,relevanceScore,reasons.", safeContext);
+  } catch (error) {
+    if (!(error instanceof HttpError) || !["AI_TIMEOUT", "AI_REQUEST_FAILED"].includes(error.code)) throw error;
+    generationMode = error.code === "AI_TIMEOUT" ? "TIMEOUT_FALLBACK" : "PROVIDER_FALLBACK";
+    reportProgress?.({ stage: "USING_FALLBACK", label: "Continuing with governed fallback", detail: error.code === "AI_TIMEOUT" ? "AI exceeded the time limit; measurable table rules will complete the draft selection." : "AI provider is unavailable; measurable table rules will complete the draft selection.", percent: 54 });
+  }
+  const fallback = { objects: candidates.slice(0, 6).map((table) => ({ tableId: table.id, businessName: table.businessName || businessName(table.tableName), description: `${table.businessName || businessName(table.tableName)} supports ${intent.primaryObjective}`, objectType: table.objectType === "VIEW" ? "VIEW" as const : table.measureColumns.length?"TRANSACTION" as const:"REFERENCE_DATA" as const })) };
   let suggestions;
-  try { suggestions = normalizeObjectSuggestions(generated ?? fallback, candidates).objects.filter((item) => !["MASTER_DATA", "REFERENCE_DATA"].includes(item.objectType)); }
+  try { suggestions = normalizeObjectSuggestions(generated ?? fallback, candidates).objects; }
   catch { suggestions = normalizeObjectSuggestions(fallback, candidates).objects; }
   if (!suggestions.length) suggestions = normalizeObjectSuggestions(fallback, candidates).objects;
   const allowed = new Map(candidates.map((table) => [table.id, table]));
-  const created = []; let skippedEmptyCount = 0;
-  for (const suggestion of suggestions) {
+  const created = [];const draftTables=[]; let skippedEmptyCount = 0;
+  for (const [suggestionIndex, suggestion] of suggestions.entries()) {
     const table = allowed.get(suggestion.tableId);
     if (!table) continue;
-    let measureData: Record<string, boolean>;
-    try { measureData = await checkColumnsHaveData(model.dataSourceId, table.id, table.measureColumns.map((column) => column.columnName)); } catch { throw new HttpError(502, "Measure data availability could not be verified. Check the Data Source connection and retry.", "DATA_AVAILABILITY_CHECK_FAILED"); }
-    if (!Object.values(measureData).some(Boolean)) { skippedEmptyCount += 1; continue; }
-    created.push(await createBusinessObject(modelId, { physicalTableId: table.id, businessName: sanitizeMetadataText(suggestion.businessName, 255), description: sanitizeMetadataText(suggestion.description, 1000), recordGrain: sanitizeMetadataText(suggestion.recordGrain, 500), objectType: suggestion.objectType, mapFields: true, aiUsageAllowed: true, notes: "Generated by governed AI assistance; human review required." }, user));
+    reportProgress?.({ stage: "VERIFYING_DATA", label: `Verifying ${table.businessName || table.tableName}`, detail: `Checking that Measure fields contain data (${suggestionIndex + 1} of ${suggestions.length}).`, percent: Math.min(78, 58 + Math.round(((suggestionIndex + 1) / Math.max(suggestions.length, 1)) * 20)) });
+    let profiles:Record<string,ColumnProfile>;try{profiles=await profileTableColumnsAggregated(model.dataSourceId,table.id,table.candidateColumns.map(column=>column.columnName));}catch{throw new HttpError(502,`Data profile could not be completed for ${table.tableName}. Check the Data Source connection and retry.`,"DATA_PROFILE_FAILED");}
+    const scoredFields=table.candidateColumns.map(column=>({column,profile:profiles[column.columnName],score:scoreIntentField(intent,column,profiles[column.columnName],column.isForeignKey?1:0)})).filter(item=>item.profile);const selectedFields=scoredFields.filter(item=>item.score.selected);if(!selectedFields.length){skippedEmptyCount+=1;continue;}
+    reportProgress?.({ stage: "MAPPING_OBJECTS", label: `Mapping ${suggestion.businessName}`, detail: "Creating the Draft Business Object and governed Business Field mappings.", percent: Math.min(94, 80 + Math.round(((suggestionIndex + 1) / Math.max(suggestions.length, 1)) * 14)) });
+    const createdObject=await createBusinessObject(modelId, { physicalTableId: table.id, businessName: sanitizeMetadataText(suggestion.businessName, 255), description: sanitizeMetadataText(suggestion.description, 1000), recordGrain: sanitizeMetadataText(suggestion.recordGrain, 500), objectType: suggestion.objectType, mapFields: true, aiUsageAllowed: true, notes: JSON.stringify({generatedBy:"BUSINESS_INTENT_PROFILE_V1",businessDomain:intent.domain,relevanceScore:table.relevanceScore,reasons:[`Matches ${intent.domain} intent`,`${selectedFields.length} eligible fields`,`${table.relationshipCount} metadata relationships`]}) }, user);created.push(createdObject);
+    const mappedFields=await db.select().from(businessFields).where(eq(businessFields.businessObjectId,createdObject.id));const scoredByColumn=new Map(scoredFields.map(item=>[item.column.columnName,item]));for(const field of mappedFields){const scored=scoredByColumn.get(field.physicalColumnName);const selected=Boolean(scored?.score.selected);const role=scored?.score.role??inferAnalyticalRole({columnName:field.physicalColumnName,dataType:field.physicalDataType,isPrimaryKey:field.isPrimaryKey,isForeignKey:field.isForeignKey});const fieldRole=role==="measure"?"MEASURE":role==="date"?"DATE_DIMENSION":role==="status"?"STATUS_DIMENSION":role==="identifier"?"IDENTIFIER":role==="relationship_key"?"FOREIGN_KEY":role==="technical"?"TECHNICAL_FIELD":selected?"DIMENSION":"IGNORED";await db.update(businessFields).set({fieldRole,aggregationRule:fieldRole==="MEASURE"?"SUM":"NONE",aiUsageAllowed:selected,visibleToDashboardCreator:selected,description:scored?sanitizeMetadataText(`${selected?"Selected":"Excluded"}: ${scored.score.reasons.join(", ")}.`,1000):"Excluded: field was outside the profiled semantic candidate set.",exampleValues:scored?JSON.stringify({profile:scored.profile,score:scored.score.finalScore,reasons:scored.score.reasons}):undefined,updatedAt:new Date(),updatedBy:user.id}).where(eq(businessFields.id,field.id));}
+    draftTables.push({tableId:table.id,sourceTableName:table.tableName,businessName:suggestion.businessName,description:suggestion.description,businessCategory:intent.domain,role:table.measureColumns.length?"transaction":"reference",relevanceScore:table.relevanceScore,rowCount:table.estimatedRowCount??profiles[table.candidateColumns[0]?.columnName]?.totalRowCount??0,selectedFieldCount:selectedFields.length,excludedFieldCount:scoredFields.length-selectedFields.length,reasons:[`Matches ${intent.domain} intent`,`${selectedFields.length} populated useful fields`,`${table.relationshipCount} metadata relationships`],fields:scoredFields.map(item=>({id:mappedFields.find(field=>field.physicalColumnName===item.column.columnName)?.id,sourceColumnName:item.column.columnName,businessName:item.column.businessName||businessName(item.column.columnName),description:item.column.description,dataType:item.column.dataType,role:item.score.role,aggregation:item.score.role==="measure"?"sum":undefined,selected:item.score.selected,score:item.score.finalScore,profile:item.profile,reasons:item.score.reasons}))});
   }
   if (!created.length) throw new HttpError(409, "AI suggestions did not include any relevant tables or views with populated Measure fields", "NO_TABLES_WITH_MEASURE_DATA");
-  return { createdCount: created.length, skippedEmptyCount, skippedNonMeasureCount, objects: created.map((item) => ({ id: item.id, businessName: item.businessName, approvalStatus: item.approvalStatus })) };
+  const rawAnalysis=generated&&typeof generated==="object"?(generated as Record<string,unknown>).analysis:null;
+  const parsedAnalysis=businessIntentAnalysisSchema.safeParse(rawAnalysis);
+  const analysis=parsedAnalysis.success?parsedAnalysis.data:{};
+  const selectedIds=new Set(draftTables.map(table=>table.tableId));const columnNames=new Map(columns.map(column=>[column.id,column.columnName]));const tableNames=new Map(unmapped.map(table=>[table.id,table.tableName]));
+  const suggestedRelationships=physicalRelationships.filter(relation=>selectedIds.has(relation.sourceTableId)&&selectedIds.has(relation.targetTableId)).map(relation=>({sourceTable:tableNames.get(relation.sourceTableId),sourceField:relation.sourceColumnId?columnNames.get(relation.sourceColumnId):undefined,targetTable:tableNames.get(relation.targetTableId),targetField:relation.targetColumnId?columnNames.get(relation.targetColumnId):undefined,relationshipType:relation.relationshipType,confidenceScore:relation.confidenceScore,discoveryMethod:relation.discoveryMethod}));
+  const excludedTables=ranked.filter(table=>!selectedIds.has(table.id)).slice(0,40).map(table=>({sourceTableName:table.tableName,businessName:table.businessName||businessName(table.tableName),relevanceScore:table.relevanceScore,reasons:[table.relevanceScore<15?"low relevance to the model business intent":"not selected after ranking",table.estimatedRowCount===0?"metadata reports no rows":"a higher-ranked table provides better coverage"]}));
+  const draft={modelName:model.name,modelDescription:model.description,businessDomain:analysis.businessDomain??intent.domain,businessObjective:analysis.businessObjective??intent.primaryObjective,businessSummary:analysis.businessSummary??intent.businessSummary,businessQuestions:analysis.businessQuestions??intent.businessQuestions,dataCoverage:analysis.dataCoverage??draftTables.map(table=>table.businessName),selectedTables:draftTables,suggestedRelationships,excludedTables,warnings:[...(analysis.warnings??[]),"Field ratios are governed sampled estimates; each profile shows its sample size and profiling time."]};
+  return { createdCount: created.length, skippedEmptyCount, skippedNonMeasureCount, generationMode, intent, draft, objects: created.map((item) => ({ id: item.id, businessName: item.businessName, approvalStatus: item.approvalStatus })) };
 }
 
 export async function generateBusinessFieldDescription(fieldId: string, user: AuthenticatedUser) {
@@ -142,7 +194,8 @@ function fallbackKpis(fields: Array<{ id: string; businessName: string; business
   }) };
 }
 
-export async function generateDraftKpisWithAi(modelId: string, user: AuthenticatedUser) {
+export async function generateDraftKpisWithAi(modelId: string, user: AuthenticatedUser, reportProgress?: ProgressReporter) {
+  reportProgress?.({ stage: "PREPARING_CONTEXT", label: "Reading governed context", detail: "Loading Business Objects, Business Fields, and existing KPI definitions.", percent: 5 });
   const model = await requireModel(modelId);
   await requireBusinessContextPermission(user, model.dataSourceId, "KPI_CREATE");
   assertEditable(model.status);
@@ -153,10 +206,11 @@ export async function generateDraftKpisWithAi(modelId: string, user: Authenticat
   ]);
   const profiles = new Map<string, ColumnProfile>();
   const profilingWarnings: string[] = [];
-  for (const object of objects) {
+  for (const [objectIndex, object] of objects.entries()) {
     const allowedObjectFields = fields.filter((field) => field.businessObjectId === object.id && field.aiUsageAllowed);
     const objectFields = allowedObjectFields.filter((field) => !/BLOB|CLOB|LONG|XMLTYPE|RAW/i.test(field.physicalDataType)).slice(0, 120);
     if (!objectFields.length) continue;
+    reportProgress?.({ stage: "PROFILING_DATA", label: `Profiling ${object.businessName}`, detail: `Checking populated, varying, and analytically useful values (${objectIndex + 1} of ${objects.length}).`, percent: Math.min(46, 12 + Math.round(((objectIndex + 1) / Math.max(objects.length, 1)) * 34)) });
     try {
       const result = await profileTableColumns(model.dataSourceId, object.physicalTableId, objectFields.map((field) => field.physicalColumnName));
       objectFields.forEach((field) => { const profile = result[field.physicalColumnName]; if (profile) profiles.set(field.id, profile); });
@@ -164,6 +218,7 @@ export async function generateDraftKpisWithAi(modelId: string, user: Authenticat
       if (objectFields.length < allowedObjectFields.length && allowedObjectFields.some((field) => /BLOB|CLOB|LONG|XMLTYPE|RAW/i.test(field.physicalDataType))) profilingWarnings.push(`${object.businessName}: large-object and binary fields were excluded from profiling.`);
     } catch { profilingWarnings.push(`${object.businessName}: the live data profile could not be completed.`); }
   }
+  reportProgress?.({ stage: "CLASSIFYING_FIELDS", label: "Classifying analytical fields", detail: "Separating measures, dimensions, identifiers, technical fields, and unusable values.", percent: 50 });
   const classified = fields.map((field) => {
     const profile = profiles.get(field.id);
     const classification = classifyBusinessField(field);
@@ -180,7 +235,18 @@ export async function generateDraftKpisWithAi(modelId: string, user: Authenticat
     fields: classified.map((item) => ({ id: item.id, objectId: item.businessObjectId, name: sanitizeMetadataText(item.businessName, 255), column: sanitizeMetadataText(item.physicalColumnName, 128), description: sanitizeMetadataText(item.description, 500), type: item.businessType, declaredRole: item.fieldRole, analyticalClassification: item.classification, aggregation: item.aggregationRule, unit: item.unit, profile: item.profile ? { ...item.profile, sampleValues: item.profile.sampleValues.map((value) => sanitizeMetadataText(value, 120)) } : null, excludedFromKpis: item.exclusionReasons })),
     eligibleMeasureFieldIds: eligible.map((item) => item.id), usefulDimensionFieldIds: dimensions.map((item) => item.id), existingKpis: existing.map((item) => ({ code: item.code, name: sanitizeMetadataText(item.name, 255) })), profilingWarnings,
   };
-  const generated = await requestStructuredAi(`You are an enterprise business intelligence analyst specializing in Oracle and IFS ERP data. Analyze the supplied table metadata and sampled data profiles before proposing KPIs. First determine the business process, row grain, and primary entities. Classify fields as identifier, status dimension, categorical dimension, date dimension, numeric measure, monetary measure, duration measure, technical metadata, or unusable. Do not generate KPIs from column names alone. Exclude fields marked by the server because they are all-null, all-zero, constant, zero-variance, at least 98% null, technical, unavailable, or non-aggregatable identifiers. STATE, MCH_CODE_DESCRIPTION, and other categorical fields are dimensions, never numeric KPIs. Propose only KPIs supported by available and varying data and never invent unavailable fields or formulas. Prefer meaningful combinations such as ratios when both required measures exist over one KPI per column. For Active Work Order data, prioritize work-order volume, status/backlog, aging, overdue work, equipment workload, repeated maintenance, completion performance, and planned-versus-actual effort or cost only when supported. Return JSON with {analysis,kpis}. analysis contains businessProcess,rowGrain,importantEntities,recommendedDimensions,recommendedMeasures,businessQuestions,recommendedVisualizations,dataQualityWarnings. Each KPI contains code,name,description,businessObjective,businessQuestion,fieldId,aggregation,optional denominatorFieldId and denominatorAggregation,measureType,unit,recommendedVisualization,usefulDimensionFieldIds,confidenceScore,evidence, and warnings. Use only supplied field IDs.`, safeContext);
+  reportProgress?.({ stage: "GENERATING_CANDIDATES", label: "Generating KPI candidates", detail: "AI is evaluating business meaning, useful combinations, evidence, and limitations.", percent: 58 });
+  let generated: unknown = null;
+  let generationMode: "AI" | "RULE_BASED" | "TIMEOUT_FALLBACK" | "PROVIDER_FALLBACK" = aiConfig() ? "AI" : "RULE_BASED";
+  try {
+    generated = await requestStructuredAi(`You are an enterprise business intelligence analyst specializing in Oracle and IFS ERP data. Analyze the supplied table metadata and sampled data profiles before proposing KPIs. First determine the business process, row grain, and primary entities. Classify fields as identifier, status dimension, categorical dimension, date dimension, numeric measure, monetary measure, duration measure, technical metadata, or unusable. Do not generate KPIs from column names alone. Exclude fields marked by the server because they are all-null, all-zero, constant, zero-variance, at least 98% null, technical, unavailable, or non-aggregatable identifiers. STATE, MCH_CODE_DESCRIPTION, and other categorical fields are dimensions, never numeric KPIs. Propose only KPIs supported by available and varying data and never invent unavailable fields or formulas. Prefer meaningful combinations such as ratios when both required measures exist over one KPI per column. For Active Work Order data, prioritize work-order volume, status/backlog, aging, overdue work, equipment workload, repeated maintenance, completion performance, and planned-versus-actual effort or cost only when supported. Return JSON with {analysis,kpis}. analysis contains businessProcess,rowGrain,importantEntities,recommendedDimensions,recommendedMeasures,businessQuestions,recommendedVisualizations,dataQualityWarnings. Each KPI contains code,name,description,businessObjective,businessQuestion,fieldId,aggregation,optional denominatorFieldId and denominatorAggregation,measureType,unit,recommendedVisualization,usefulDimensionFieldIds,confidenceScore,evidence, and warnings. Use only supplied field IDs.`, safeContext);
+  } catch (error) {
+    if (!(error instanceof HttpError) || !["AI_TIMEOUT", "AI_REQUEST_FAILED"].includes(error.code)) throw error;
+    generationMode = error.code === "AI_TIMEOUT" ? "TIMEOUT_FALLBACK" : "PROVIDER_FALLBACK";
+    const warning = error.code === "AI_TIMEOUT" ? "AI response exceeded the time limit; governed rule-based KPI candidates were used." : "AI provider was unavailable; governed rule-based KPI candidates were used.";
+    profilingWarnings.push(warning);
+    reportProgress?.({ stage: "USING_FALLBACK", label: "Continuing with governed fallback", detail: warning, percent: 72 });
+  }
   const fallback = fallbackKpis(eligible);
   const normalizedFallback = normalizeKpiSuggestions(fallback, eligible);
   let suggestions;
@@ -190,11 +256,13 @@ export async function generateDraftKpisWithAi(modelId: string, user: Authenticat
   } catch {
     suggestions = kpiSuggestionSchema.parse(normalizedFallback).kpis;
   }
+  reportProgress?.({ stage: "VALIDATING_CANDIDATES", label: "Validating KPI candidates", detail: "Checking field IDs, formula types, dimensions, duplicate names, and governance rules.", percent: 80 });
   const allowed = new Map(eligible.map((field) => [field.id, field]));
   const dimensionMap = new Map(dimensions.map((field) => [field.id, field]));
   const usedCodes = new Set(existing.map((item) => item.code));
   const usedNames = new Set(existing.map((item) => item.name.toLowerCase()));
   const created = [];
+  reportProgress?.({ stage: "SAVING_DRAFTS", label: "Saving governed drafts", detail: `Creating up to ${suggestions.length} reviewable KPI drafts with evidence and warnings.`, percent: 88 });
   for (const suggestion of suggestions) {
     const field = allowed.get(suggestion.fieldId);
     if (!field) continue;
@@ -224,5 +292,5 @@ export async function generateDraftKpisWithAi(modelId: string, user: Authenticat
   const rawAnalysis = generated && typeof generated === "object" ? ((generated as Record<string, unknown>).analysis ?? generated) : {};
   const parsedAnalysis = kpiAnalysisSchema.safeParse(rawAnalysis);
   const analysis = { ...(parsedAnalysis.success ? parsedAnalysis.data : { businessProcess: model.description || model.name, rowGrain: objects.map((item) => item.recordGrain).filter(Boolean).join("; "), importantEntities: objects.map((item) => item.businessName), recommendedDimensions: dimensions.slice(0, 12).map((item) => item.businessName), recommendedMeasures: eligible.slice(0, 12).map((item) => item.businessName), businessQuestions: created.map((item) => item.businessQuestion).filter((item): item is string => Boolean(item)), recommendedVisualizations: created.map((item) => item.recommendedVisualization).filter((item): item is string => Boolean(item)), dataQualityWarnings: profilingWarnings }), excludedColumns: classified.filter((item) => item.exclusionReasons.length).map((item) => ({ field: item.businessName, column: item.physicalColumnName, classification: item.classification, reasons: item.exclusionReasons })).slice(0, 80) };
-  return { createdCount: created.length, checkedFieldCount: fields.length, profiledFieldCount: profiles.size, eligibleFieldCount: eligible.length, excludedFieldCount: classified.filter((item) => item.exclusionReasons.length).length, skippedEmptyFieldCount: classified.filter((item) => item.exclusionReasons.some((reason) => reason.includes("null"))).length, analysis, kpis: created.map((item) => ({ id: item.id, code: item.code, name: item.name, status: item.status })) };
+  return { createdCount: created.length, checkedFieldCount: fields.length, profiledFieldCount: profiles.size, eligibleFieldCount: eligible.length, excludedFieldCount: classified.filter((item) => item.exclusionReasons.length).length, skippedEmptyFieldCount: classified.filter((item) => item.exclusionReasons.some((reason) => reason.includes("null"))).length, generationMode, analysis, kpis: created.map((item) => ({ id: item.id, code: item.code, name: item.name, status: item.status })) };
 }

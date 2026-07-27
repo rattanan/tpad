@@ -13,6 +13,7 @@ import { previewTable } from "@/lib/data-sources/preview";
 import { requireDataSourceAccess } from "@/lib/data-sources/service";
 import { requireBusinessContextPermission, assertEditable, maySeePhysicalMetadata } from "./permissions";
 import { collectFormulaFieldIds, type FormulaNode } from "./formula";
+import { interpretBusinessIntent } from "./business-intent";
 
 type Model = typeof businessContextModels.$inferSelect;
 const now = () => new Date();
@@ -210,6 +211,7 @@ export async function createBusinessRelationship(modelId: string, input: { sourc
 
 export async function getBusinessContextWorkspace(id: string, user: AuthenticatedUser) {
   const model = await requireModel(id); await requireBusinessContextPermission(user, model.dataSourceId, "BUSINESS_CONTEXT_VIEW");
+  const businessIntent=interpretBusinessIntent(model.name,model.description);
   if (user.role === "DASHBOARD_CREATOR" && model.status !== "PUBLISHED") throw new HttpError(404, "Business Context Model not found", "NOT_FOUND");
   const [domains, objects, fields, relationships, kpis, recommendations, versions, glossary, reviews] = await Promise.all([
     db.select().from(businessDomains).where(and(eq(businessDomains.modelId, id), isNull(businessDomains.deletedAt))).orderBy(asc(businessDomains.name)),
@@ -224,8 +226,8 @@ export async function getBusinessContextWorkspace(id: string, user: Authenticate
   ]);
   const objectNames = new Map(objects.map((object) => [object.id, object.businessName]));
   const namedFields = fields.map((field) => ({ ...field, businessObjectName: objectNames.get(field.businessObjectId) ?? "Unknown object" }));
-  if (maySeePhysicalMetadata(user)) return { model, domains, objects, fields: namedFields.map((field) => ({ ...field, exampleValues: undefined })), relationships, kpis, recommendations, versions, glossary, reviews };
-  return { model, domains, objects: objects.filter((item) => item.approvalStatus === "APPROVED").map((item) => omit(item, ["technicalName", "databaseSchema", "physicalTableId", "primaryKeyDefinition"] as const)), fields: namedFields.filter((item) => item.approvalStatus === "APPROVED" && item.visibleToDashboardCreator).map((item) => omit(item, ["physicalColumnName", "physicalColumnId", "physicalDataType", "exampleValues"] as const)), relationships: relationships.filter((item) => item.approvalStatus === "APPROVED"), kpis: kpis.filter((item) => ["APPROVED", "CERTIFIED"].includes(item.status)).map((item) => omit(item, ["formulaAst"] as const)), recommendations: [], versions: versions.map((item) => omit(item, ["objectsSnapshot", "fieldsSnapshot", "relationshipsSnapshot", "kpisSnapshot", "glossarySnapshot"] as const)), glossary: glossary.filter((item) => item.approvalStatus === "APPROVED"), reviews: [] };
+  if (maySeePhysicalMetadata(user)) return { model, businessIntent, domains, objects, fields: namedFields.map((field) => ({ ...field, exampleValues: undefined })), relationships, kpis, recommendations, versions, glossary, reviews };
+  return { model, businessIntent, domains, objects: objects.filter((item) => item.approvalStatus === "APPROVED").map((item) => omit(item, ["technicalName", "databaseSchema", "physicalTableId", "primaryKeyDefinition"] as const)), fields: namedFields.filter((item) => item.approvalStatus === "APPROVED" && item.visibleToDashboardCreator).map((item) => omit(item, ["physicalColumnName", "physicalColumnId", "physicalDataType", "exampleValues"] as const)), relationships: relationships.filter((item) => item.approvalStatus === "APPROVED"), kpis: kpis.filter((item) => ["APPROVED", "CERTIFIED"].includes(item.status)).map((item) => omit(item, ["formulaAst"] as const)), recommendations: [], versions: versions.map((item) => omit(item, ["objectsSnapshot", "fieldsSnapshot", "relationshipsSnapshot", "kpisSnapshot", "glossarySnapshot"] as const)), glossary: glossary.filter((item) => item.approvalStatus === "APPROVED"), reviews: [] };
 }
 
 export async function createKpi(input: { modelId: string; code: string; name: string; shortName?: string; description?: string; businessObjective?: string; businessQuestion?: string; businessDomainId?: string; owner?: string; dataSteward?: string; tags?: string[]; measureType: "ADDITIVE" | "SEMI_ADDITIVE" | "NON_ADDITIVE" | "RATIO" | "COUNT"; formulaAst: FormulaNode; nullHandling: "ZERO" | "IGNORE" | "ERROR"; divisionByZeroHandling: "NULL" | "ZERO" | "ERROR"; decimalPrecision: number; unit?: string; currency?: string; defaultDateFieldId?: string; dateLogic?: unknown; recommendedVisualization?: string; displayFormat?: string }, user: AuthenticatedUser) {

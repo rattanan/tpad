@@ -15,7 +15,7 @@ describe("KPI column profiling", () => {
   it("excludes constant and all-zero measures", () => {
     const profile = summarizeColumnProfile([0, 0, 0], true);
     expect(profileExclusionReasons(measure, profile)).toEqual(expect.arrayContaining([
-      "only one distinct sampled value", "all sampled numeric values are zero", "standard deviation is zero",
+      "only one distinct sampled value", "numeric values are at least 95% zero", "standard deviation is zero",
     ]));
   });
 
