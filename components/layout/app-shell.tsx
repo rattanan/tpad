@@ -7,7 +7,7 @@ import { IfsLogo } from "@/components/brand/ifs-logo";
 import type { Role } from "@/lib/db/schema";
 
 type NavItem = { href: string; label: string; icon: IconName; exact?: boolean };
-type IconName = "home" | "chart" | "star" | "clock" | "database" | "catalog" | "layers" | "kpi" | "users" | "key" | "audit" | "history" | "profile" | "security" | "menu" | "close" | "logout";
+type IconName = "home" | "chart" | "star" | "clock" | "database" | "catalog" | "layers" | "kpi" | "users" | "key" | "audit" | "history" | "profile" | "security" | "menu" | "close" | "logout" | "chevronLeft" | "chevronRight";
 
 const paths: Record<IconName, ReactNode> = {
   home: <><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10M9 20v-6h6v6"/></>,
@@ -24,14 +24,14 @@ const paths: Record<IconName, ReactNode> = {
   history: <><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></>,
   profile: <><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></>,
   security: <><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></>,
-  menu: <path d="M4 7h16M4 12h16M4 17h16"/>, close: <path d="m6 6 12 12M18 6 6 18"/>, logout: <><path d="M10 17l5-5-5-5M15 12H3"/><path d="M14 3h6v18h-6"/></>,
+  menu: <path d="M4 7h16M4 12h16M4 17h16"/>, close: <path d="m6 6 12 12M18 6 6 18"/>, logout: <><path d="M10 17l5-5-5-5M15 12H3"/><path d="M14 3h6v18h-6"/></>, chevronLeft: <path d="m15 18-6-6 6-6"/>, chevronRight: <path d="m9 18 6-6-6-6"/>,
 };
 
 function Icon({ name }: { name: IconName }) { return <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>; }
 const roleLabels: Record<Role, string> = { ADMIN: "Administrator", DATA_SOURCE_CREATOR: "Data Source Creator", DASHBOARD_CREATOR: "Dashboard Creator", VIEWER: "Viewer" };
 
 export default function AppShell({ user, children }: { user: { fullName: string; email: string; role: Role }; children: ReactNode }) {
-  const pathname = usePathname(); const router = useRouter(); const [open, setOpen] = useState(false); const [loggingOut, setLoggingOut] = useState(false);
+  const pathname = usePathname(); const router = useRouter(); const [open, setOpen] = useState(false); const [collapsed, setCollapsed] = useState(false); const [loggingOut, setLoggingOut] = useState(false);
   const isViewer = user.role === "VIEWER";
   const workspace: NavItem[] = isViewer
     ? [{ href: "/dashboards", label: "Published Dashboards", icon: "chart", exact: true }, { href: "/dashboards?view=favorites", label: "Favorites", icon: "star", exact: true }, { href: "/dashboards?view=recent", label: "Recent", icon: "clock", exact: true }]
@@ -42,12 +42,12 @@ export default function AppShell({ user, children }: { user: { fullName: string;
   const title = [...workspace, ...admin, ...account].find(active)?.label ?? "Workspace";
   const initials = user.fullName.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
   async function logout() { setLoggingOut(true); await fetch("/api/auth/logout", { method: "POST" }); router.replace("/"); router.refresh(); }
-  const group = (label: string, items: NavItem[]) => items.length ? <div className="shell-nav-group"><p>{label}</p>{items.map((item) => <Link key={item.href} href={item.href} className={active(item) ? "active" : ""} aria-current={active(item) ? "page" : undefined} onClick={() => setOpen(false)}><Icon name={item.icon}/><span>{item.label}</span></Link>)}</div> : null;
+  const group = (label: string, items: NavItem[]) => items.length ? <div className="shell-nav-group"><p>{label}</p>{items.map((item) => <Link key={item.href} href={item.href} className={active(item) ? "active" : ""} aria-current={active(item) ? "page" : undefined} aria-label={collapsed ? item.label : undefined} title={collapsed ? item.label : undefined} onClick={() => setOpen(false)}><Icon name={item.icon}/><span>{item.label}</span></Link>)}</div> : null;
   return <div className="insight-shell">
     <button className="shell-mobile-toggle" aria-label={open ? "Close navigation" : "Open navigation"} aria-expanded={open} onClick={() => setOpen(!open)}><Icon name={open ? "close" : "menu"}/></button>
     {open && <button className="shell-scrim" aria-label="Close navigation" onClick={() => setOpen(false)}/>} 
-    <aside className={`insight-sidebar ${open ? "open" : ""}`}>
-      <Link className="insight-brand" href={isViewer ? "/dashboards" : "/overview"} onClick={() => setOpen(false)}><IfsLogo variant="light"/></Link>
+    <aside className={`insight-sidebar ${open ? "open" : ""} ${collapsed ? "collapsed" : ""}`}>
+      <div className="insight-brand-row"><Link className="insight-brand" href={isViewer ? "/dashboards" : "/overview"} onClick={() => setOpen(false)}><IfsLogo variant="light" markOnly={collapsed}/></Link><button className="shell-collapse-toggle" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} aria-pressed={collapsed} title={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={() => setCollapsed(!collapsed)}><Icon name={collapsed ? "chevronRight" : "chevronLeft"}/></button></div>
       <div className="insight-workspace"><span>IFS</span><div><strong>AI-POWERED DECISION INTELLIGENCE</strong></div></div>
       <nav aria-label="Main navigation">{group("WORKSPACE", workspace)}{group("ADMINISTRATION", admin)}{group("ACCOUNT", account)}</nav>
       <div className="shell-account"><span className="shell-avatar">{initials}</span><div><strong>{user.fullName}</strong><small>{roleLabels[user.role]}</small></div><button onClick={logout} disabled={loggingOut} aria-label="Sign out" title="Sign out"><Icon name="logout"/></button></div>
