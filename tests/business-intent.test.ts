@@ -36,4 +36,18 @@ describe("business-context intent discovery", () => {
     const flag = { columnName: "IS_RESERVED", businessName: "Is Reserved", description: "Inventory reservation flag", dataType: "NUMBER", isPrimaryKey: false, isForeignKey: false };
     expect(inferAnalyticalRole(flag)).toBe("status");
   });
+
+  it("does not incorrectly default an unknown business model to Inventory", () => {
+    const intent = interpretBusinessIntent("Customer Service", "Analyze cases, response time, and service channels");
+    expect(intent.domain).toBe("Customer Service");
+    expect(intent.searchTerms).toEqual(expect.arrayContaining(["customer", "service", "cases", "response"]));
+  });
+
+  it("uses relevant table context when a populated field name is abbreviated", () => {
+    const intent = interpretBusinessIntent("Customer Service", "Analyze cases and response time");
+    const field = { columnName: "RESP_MINS", businessName: "Response Minutes", description: null, dataType: "NUMBER", isPrimaryKey: false, isForeignKey: false };
+    const score = scoreIntentField(intent, field, summarizeColumnProfile([12, 18, 25, 31], true), 0, 70);
+    expect(score.eligible).toBe(true);
+    expect(score.selected).toBe(true);
+  });
 });
