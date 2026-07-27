@@ -19,4 +19,9 @@ describe("AI progress stream client", () => {
     const response = streamResponse(["event: failure\ndata: {\"error\":\"No usable measures\"}\n\n"]);
     await expect(readAiProgressResponse(response, () => undefined)).rejects.toThrow("No usable measures");
   });
+
+  it("includes the last generation step and request reference in failures", async () => {
+    const response = streamResponse(["event: failure\ndata: {\"error\":\"Dashboard generation could not finish.\",\"progressLabel\":\"Running dashboard quality gate\",\"requestId\":\"request-123\"}\n\n"]);
+    await expect(readAiProgressResponse(response, () => undefined)).rejects.toThrow("Last step: Running dashboard quality gate. Reference: request-123");
+  });
 });

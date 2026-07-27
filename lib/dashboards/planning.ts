@@ -26,6 +26,42 @@ export type BlockPlan = {
 export type FilterPlan = { fieldId: string; label: string; controlType: SmartFilterControlType; affectedPlanBlockIds: string[]; reason: string };
 export type DashboardPlan = { title: string; description: string; businessObjective: string; audience: "EXECUTIVE" | "MANAGER" | "OPERATIONAL" | "ANALYST"; primaryMetricKey: string; businessQuestions: BusinessQuestionPlan[]; metrics: MetricPlan[]; filters: FilterPlan[]; blocks: BlockPlan[]; layout: { columns: 12; responsive: "STACK"; rows: number } };
 
+export function simplerBlockCandidates(candidate: BlockPlan): BlockPlan[] {
+  if (candidate.type === "TEXT_INSIGHT") return [];
+  const alternatives: BlockPlan[] = [];
+  const dimensionFieldId = candidate.timeFieldId ?? candidate.dimensionFieldIds[0];
+  if (dimensionFieldId && candidate.type !== "TABLE") {
+    alternatives.push({
+      ...candidate,
+      id: `${candidate.id}-table-fallback`,
+      type: "TABLE",
+      title: `${candidate.title} — Summary`,
+      datasetShape: "SUMMARY_RECORDS",
+      dimensionFieldIds: [dimensionFieldId],
+      timeFieldId: undefined,
+      timeGrain: undefined,
+      visualizationType: "TABLE",
+      suitability: scoreBlockSuitability({ blockType:"TABLE", businessRelevance:85, dataQuality:85, informationValue:75, visualizationFit:85, actionability:90, audienceFit:80, reasons:["Simplified after the preferred visualization could not produce a valid dataset"] }),
+    });
+  }
+  if (candidate.kpiId && candidate.type !== "KPI_CARD") {
+    alternatives.push({
+      ...candidate,
+      id: `${candidate.id}-kpi-fallback`,
+      type: "KPI_CARD",
+      title: `${candidate.title} — Total`,
+      datasetShape: "SINGLE_VALUE",
+      dimensionFieldIds: [],
+      timeFieldId: undefined,
+      timeGrain: undefined,
+      visualizationType: "NUMBER",
+      position: { ...candidate.position, w: Math.min(4, candidate.position.w), h: 2 },
+      suitability: scoreBlockSuitability({ blockType:"KPI_CARD", businessRelevance:80, dataQuality:90, informationValue:70, visualizationFit:90, actionability:65, audienceFit:85, reasons:["Reduced to a governed single-value result after richer dataset shapes failed"] }),
+    });
+  }
+  return alternatives;
+}
+
 export type BlockDefinition = { type: GeneratedDashboardBlockType; supportedShapes: DatasetShape[]; minMeasures: number; maxMeasures?: number; minDimensions: number; maxDimensions?: number; requiresTimeDimension?: boolean; requiresTarget?: boolean; requiresOrderedStages?: boolean; requiresExceptionCondition?: boolean; maximumRecommendedCategories?: number };
 export const BLOCK_REGISTRY: Record<GeneratedDashboardBlockType, BlockDefinition> = {
   KPI_CARD:{type:"KPI_CARD",supportedShapes:["SINGLE_VALUE","VALUE_WITH_CHANGE"],minMeasures:1,maxMeasures:2,minDimensions:0,maxDimensions:0},

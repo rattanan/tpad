@@ -14,10 +14,10 @@ export async function readAiProgressResponse<TResult>(response: Response, onProg
     const event = block.split("\n").find((line) => line.startsWith("event: "))?.slice(7);
     const raw = block.split("\n").find((line) => line.startsWith("data: "))?.slice(6);
     if (!event || !raw) return;
-    const payload = JSON.parse(raw) as AiProgress & TResult & { error?: string };
+    const payload = JSON.parse(raw) as AiProgress & TResult & { error?: string; requestId?: string; progressLabel?: string };
     if (event === "progress") onProgress(payload);
     if (event === "complete") result = payload;
-    if (event === "failure") throw new Error(payload.error ?? "AI generation could not be completed");
+    if (event === "failure") throw new Error(`${payload.error ?? "AI generation could not be completed"}${payload.progressLabel ? ` Last step: ${payload.progressLabel}.` : ""}${payload.requestId ? ` Reference: ${payload.requestId}` : ""}`);
   };
   while (true) {
     const { done, value } = await reader.read();

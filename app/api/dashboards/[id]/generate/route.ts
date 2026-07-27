@@ -13,10 +13,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const session = await requireSession(request);
     const id = (await params).id;
     if (request.headers.get("accept")?.includes("text/event-stream")) {
-      return createAiProgressStream({ requestId: meta.requestId, run: (report) => generateDraftDashboardWithAi(id, session.user, report), onComplete: (result) => writeAudit({ actor: session.user, action: "DASHBOARD_DRAFT_GENERATED_WITH_AI", category: "DASHBOARD_AI", targetType: "DASHBOARD", targetId: id, newValues: { blockCount: result.blockCount, filterCount: result.filterCount, planningMode: result.planningMode, fallbackReason: result.fallbackReason, validationOutcome: result.validationOutcome }, meta }) });
+      return createAiProgressStream({ requestId: meta.requestId, run: (report) => generateDraftDashboardWithAi(id, session.user, report), onComplete: (result) => writeAudit({ actor: session.user, action: "DASHBOARD_DRAFT_GENERATED_WITH_AI", category: "DASHBOARD_AI", targetType: "DASHBOARD", targetId: id, newValues: { blockCount: result.blockCount, filterCount: result.filterCount, repairedBlockCount: result.repairedBlockCount, skippedBlockCount: result.skippedBlockCount, autoFixCount: result.autoFixCount, repairRounds: result.repairRounds, planningMode: result.planningMode, fallbackReason: result.fallbackReason, validationOutcome: result.validationOutcome, qualityScore: result.quality.score, requiresReview: result.requiresReview }, meta }) });
     }
     const result = await generateDraftDashboardWithAi(id, session.user);
-    await writeAudit({ actor: session.user, action: "DASHBOARD_DRAFT_GENERATED_WITH_AI", category: "DASHBOARD_AI", targetType: "DASHBOARD", targetId: id, newValues: { blockCount: result.blockCount, filterCount: result.filterCount, validationOutcome: result.validationOutcome }, meta });
+    await writeAudit({ actor: session.user, action: "DASHBOARD_DRAFT_GENERATED_WITH_AI", category: "DASHBOARD_AI", targetType: "DASHBOARD", targetId: id, newValues: { blockCount: result.blockCount, filterCount: result.filterCount, repairedBlockCount: result.repairedBlockCount, skippedBlockCount: result.skippedBlockCount, autoFixCount: result.autoFixCount, repairRounds: result.repairRounds, validationOutcome: result.validationOutcome, qualityScore: result.quality.score, requiresReview: result.requiresReview }, meta });
     return Response.json(result, { status: 201 });
   } catch (error) {
     return apiError(error, meta.requestId);
