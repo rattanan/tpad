@@ -1,4 +1,4 @@
-# IFS Insight
+# InsightFS
 
 Governed Oracle intelligence and dashboard workspace for IFS.
 

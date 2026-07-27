@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { hasPermission } from "@/lib/auth/permissions";
 import type { AuthenticatedUser } from "@/lib/auth/session";
 import { db } from "@/lib/db";
-import { dashboardBlocks, dashboardFavorites, dashboardGlobalFilters, dashboardPublications, dashboardRecentViews, dashboards, dashboardVersions, dashboardViewEvents } from "@/lib/db/schema";
+import { businessFields, businessObjects, dashboardBlocks, dashboardFavorites, dashboardGlobalFilters, dashboardPublications, dashboardRecentViews, dashboards, dashboardVersions, dashboardViewEvents } from "@/lib/db/schema";
 import { getDataSource } from "@/lib/data-sources/service";
 import { withOracleConnection } from "@/lib/data-sources/oracle";
 import { generateBlockQuery } from "@/lib/dashboards/query";
+import { parseSmartFilterConfiguration, recommendFilterConfiguration } from "@/lib/dashboards/filter-controls";
 import type { z } from "zod";
 import { HttpError } from "@/lib/http";
 import { canAccessPublication } from "./access";
@@ -14,6 +15,8 @@ import { runtimeFiltersSchema } from "./validation";
 
 export type RuntimeFilterInput = z.infer<typeof runtimeFiltersSchema>;
 const parseJson = <T>(value: string | null | undefined, fallback: T): T => { try { return value ? JSON.parse(value) as T : fallback; } catch { return fallback; } };
+const oracleIdentifier = (value: string) => { if (!/^[A-Za-z][A-Za-z0-9_$#]*$/.test(value)) throw new HttpError(400, "Unsafe Oracle identifier", "UNSAFE_IDENTIFIER"); return `"${value.toUpperCase()}"`; };
+const filterOptionsCache = new Map<string, { expiresAt: number; result: { items: Array<{ label: string; value: string | number | boolean }>; page: number; pageSize: number; hasMore: boolean } }>();
 
 export async function getPublishedDashboardRecord(slug: string, user: AuthenticatedUser) {
   if (!hasPermission(user.role, "VIEW_PUBLISHED_DASHBOARD")) throw new HttpError(403, "Published dashboard access is not permitted", "FORBIDDEN");
@@ -52,16 +55,52 @@ export async function getPublishedDashboard(slug: string, user: AuthenticatedUse
   const row = await getPublishedDashboardRecord(slug, user);
   const [blocks, filters, favorite] = await Promise.all([
     db.select().from(dashboardBlocks).where(and(eq(dashboardBlocks.dashboardVersionId, row.version.id), eq(dashboardBlocks.isHidden, false))).orderBy(asc(dashboardBlocks.sortOrder)),
-    db.select().from(dashboardGlobalFilters).where(and(eq(dashboardGlobalFilters.dashboardVersionId, row.version.id), eq(dashboardGlobalFilters.isVisible, true))),
+    db.select({ filter: dashboardGlobalFilters, field: businessFields }).from(dashboardGlobalFilters).innerJoin(businessFields, eq(businessFields.id, dashboardGlobalFilters.businessFieldId)).where(and(eq(dashboardGlobalFilters.dashboardVersionId, row.version.id), eq(dashboardGlobalFilters.isVisible, true))),
     db.select().from(dashboardFavorites).where(and(eq(dashboardFavorites.userId, user.id), eq(dashboardFavorites.dashboardId, row.dashboard.id))).limit(1),
   ]);
   return {
     dashboard: { id: row.dashboard.id, slug: row.dashboard.slug!, name: row.dashboard.name, description: row.dashboard.description, category: row.dashboard.category, thumbnailUrl: row.dashboard.thumbnailUrl, publishedAt: row.publication.publishedAt, lastDataRefreshAt: row.dashboard.lastDataRefreshAt, favorite: Boolean(favorite[0]) },
-    blocks: blocks.map((block) => ({ id: block.id, title: block.title, description: block.description, businessQuestion: block.businessQuestion, decisionSupported: block.decisionSupported, blockType: block.blockType, visualizationType: block.visualizationType, position: parseJson(block.positionJson, { x: 0, y: 0, w: 6, h: 4 }), preview: parseJson<Record<string, unknown> | null>(block.previewJson, null) })),
-    filters: filters.map((filter) => ({ id: filter.id, name: filter.name, filterType: filter.filterType, defaultValue: parseJson(filter.defaultValueJson, null), allowedValues: parseJson<unknown[]>(filter.allowedValuesJson, []), required: filter.isRequired, runtimeEditable: filter.runtimeEditable })),
+    blocks: blocks.map((block) => ({ id: block.id, title: block.title, description: block.description, businessQuestion: block.businessQuestion, decisionSupported: block.decisionSupported, blockType: block.blockType, visualizationType: block.visualizationType, visualizationConfig: parseJson<Record<string, unknown>>(block.visualizationConfigJson, {}), position: parseJson(block.positionJson, { x: 0, y: 0, w: 6, h: 4 }), preview: parseJson<Record<string, unknown> | null>(block.previewJson, null) })),
+    filters: filters.map(({ filter, field }, index) => { const allowedValues = parseJson<unknown[]>(filter.allowedValuesJson, []); const fallback = recommendFilterConfiguration(field, allowedValues.length, filter.filterType, index); return { id: filter.id, name: filter.name, filterType: filter.filterType, dataType: field.businessType, semanticRole: field.fieldRole, fieldName: field.businessName, defaultValue: parseJson(filter.defaultValueJson, null), allowedValues, affectedBlockIds: parseJson<string[]>(filter.appliesToBlockIdsJson, []), required: filter.isRequired, runtimeEditable: filter.runtimeEditable, urlStateAllowed: field.sensitivityClassification === "NONE", configuration: parseSmartFilterConfiguration(filter.configurationJson, fallback) }; }).sort((a, b) => a.configuration.position - b.configuration.position),
     capabilities: { export: row.publication.exportAllowed && hasPermission(user.role, "EXPORT_PUBLISHED_DASHBOARD"), underlyingData: row.publication.underlyingDataAllowed && hasPermission(user.role, "VIEW_UNDERLYING_DATA"), drillDown: row.publication.drillDownAllowed, ai: row.publication.aiCopilotAllowed && hasPermission(user.role, "USE_DASHBOARD_COPILOT"), executiveSummary: row.publication.aiCopilotAllowed && hasPermission(user.role, "GENERATE_EXECUTIVE_SUMMARY") },
     suggestedQuestions: suggestedQuestions(row.dashboard.category),
   };
+}
+
+export async function getPublishedFilterOptions(slug: string, filterId: string, input: { search: string; page: number; pageSize: number; parentFilters: RuntimeFilterInput }, user: AuthenticatedUser) {
+  const row = await getPublishedDashboardRecord(slug, user);
+  const selected = (await db.select({ filter: dashboardGlobalFilters, field: businessFields, object: businessObjects }).from(dashboardGlobalFilters)
+    .innerJoin(businessFields, eq(businessFields.id, dashboardGlobalFilters.businessFieldId))
+    .innerJoin(businessObjects, eq(businessObjects.id, businessFields.businessObjectId))
+    .where(and(eq(dashboardGlobalFilters.id, filterId), eq(dashboardGlobalFilters.dashboardVersionId, row.version.id), eq(dashboardGlobalFilters.isVisible, true))).limit(1))[0];
+  if (!selected || !selected.filter.runtimeEditable || selected.filter.securityEnforced) throw new HttpError(404, "Published filter not found", "NOT_FOUND");
+  const allowedValues = parseJson<Array<string | number | boolean>>(selected.filter.allowedValuesJson, []);
+  const configuration = parseSmartFilterConfiguration(selected.filter.configurationJson, recommendFilterConfiguration(selected.field, allowedValues.length, selected.filter.filterType));
+  if (input.search.length < configuration.minimumSearchCharacters && configuration.searchMode === "SERVER") return { items: [], page: input.page, pageSize: input.pageSize, hasMore: false, minimumSearchCharacters: configuration.minimumSearchCharacters };
+  const normalizedSearch = input.search.trim().toLocaleLowerCase();
+  if (allowedValues.length) {
+    const matching = allowedValues.filter((value) => String(value).toLocaleLowerCase().includes(normalizedSearch)); const offset = (input.page - 1) * input.pageSize; const pageItems = matching.slice(offset, offset + input.pageSize + 1);
+    return { items: pageItems.slice(0, input.pageSize).map((value) => ({ label: String(value), value })), page: input.page, pageSize: input.pageSize, hasMore: pageItems.length > input.pageSize };
+  }
+  const validatedParents = runtimeFiltersSchema.parse(input.parentFilters).filter((parent) => configuration.dependsOn.includes(parent.filterId) && parent.values.length);
+  const cacheKey = JSON.stringify([row.version.id, filterId, normalizedSearch, input.page, input.pageSize, validatedParents]); const cached = filterOptionsCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.result;
+  const parentRows = validatedParents.length ? await db.select({ filter: dashboardGlobalFilters, field: businessFields }).from(dashboardGlobalFilters).innerJoin(businessFields, eq(businessFields.id, dashboardGlobalFilters.businessFieldId)).where(and(eq(dashboardGlobalFilters.dashboardVersionId, row.version.id), inArray(dashboardGlobalFilters.id, validatedParents.map((parent) => parent.filterId)))) : [];
+  const parentMap = new Map(parentRows.map((item) => [item.filter.id, item]));
+  const target = oracleIdentifier(selected.field.physicalColumnName); const binds: Record<string, string | number | boolean> = {};
+  const predicates = [`${target} IS NOT NULL`]; let bindIndex = 0;
+  if (normalizedSearch) { binds.search = `%${normalizedSearch.replace(/[\\%_]/g, "\\$&").toLocaleUpperCase()}%`; predicates.push(`UPPER(TO_CHAR(${target})) LIKE :search ESCAPE '\\'`); }
+  for (const parent of validatedParents) {
+    const source = parentMap.get(parent.filterId); if (!source || source.field.businessObjectId !== selected.field.businessObjectId) continue;
+    const allowed = parseJson<unknown[]>(source.filter.allowedValuesJson, []); if (allowed.length && parent.values.some((value) => !allowed.some((item) => String(item) === String(value)))) throw new HttpError(400, "Parent filter value is outside the published allowlist", "FILTER_VALUE_NOT_ALLOWED");
+    const column = oracleIdentifier(source.field.physicalColumnName); const placeholders = parent.values.map((value) => { const key = `p${++bindIndex}`; binds[key] = value as string | number | boolean; return `:${key}`; }); predicates.push(`${column} IN (${placeholders.join(", ")})`);
+  }
+  binds.offsetRows = (input.page - 1) * input.pageSize; binds.optionLimit = input.pageSize + 1;
+  const source = await getDataSource(row.version.dataSourceId); if (!source) throw new HttpError(404, "Dashboard data source is unavailable", "NOT_FOUND");
+  const query = `SELECT DISTINCT ${target} AS FILTER_VALUE FROM ${oracleIdentifier(selected.object.databaseSchema)}.${oracleIdentifier(selected.object.technicalName)} WHERE ${predicates.join(" AND ")} ORDER BY FILTER_VALUE OFFSET :offsetRows ROWS FETCH NEXT :optionLimit ROWS ONLY`;
+  const rows = await withOracleConnection(source, async (connection, outFormat) => ((await connection.execute(query, binds, { outFormat, maxRows: input.pageSize + 1 })).rows ?? []) as Array<{ FILTER_VALUE: string | number | boolean }>);
+  const result = { items: rows.slice(0, input.pageSize).map((item) => ({ label: String(item.FILTER_VALUE), value: item.FILTER_VALUE })), page: input.page, pageSize: input.pageSize, hasMore: rows.length > input.pageSize };
+  if (filterOptionsCache.size > 200) filterOptionsCache.clear(); filterOptionsCache.set(cacheKey, { expiresAt: Date.now() + 60_000, result }); return result;
 }
 
 function suggestedQuestions(category: string) {
@@ -101,8 +140,21 @@ function runtimeToQueryFilters(filters: typeof dashboardGlobalFilters.$inferSele
     const allowed = parseJson<unknown[]>(filter.allowedValuesJson, []); if (allowed.length && values.some((value) => !allowed.some((item) => String(item) === String(value)))) throw new HttpError(400, "Filter value is outside the published allowlist", "FILTER_VALUE_NOT_ALLOWED");
     if (filter.isRequired && !values.length) throw new HttpError(400, `${filter.name} is required`, "FILTER_REQUIRED");
     if (!values.length) return [];
+    let normalizedValues = values;
+    if (filter.filterType === "DATE_RANGE") {
+      if (values.length !== 2 || typeof values[0] !== "string" || typeof values[1] !== "string") throw new HttpError(400, "Date range requires From and To dates", "INVALID_FILTER_RANGE");
+      const from = new Date(`${values[0]}T00:00:00.000`); const to = new Date(`${values[1]}T23:59:59.999`);
+      if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from > to) throw new HttpError(400, "Date From must not be later than Date To", "INVALID_FILTER_RANGE");
+      normalizedValues = [from, to] as unknown as typeof values;
+    }
+    if (filter.filterType === "NUMERIC_RANGE") {
+      if (values.length !== 2) throw new HttpError(400, "Number range requires minimum and maximum values", "INVALID_FILTER_RANGE");
+      const minimum = Number(values[0]); const maximum = Number(values[1]);
+      if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || minimum > maximum) throw new HttpError(400, "Number minimum must not be greater than maximum", "INVALID_FILTER_RANGE");
+      normalizedValues = [minimum, maximum];
+    }
     const operator = filter.filterType === "DATE_RANGE" || filter.filterType === "NUMERIC_RANGE" ? "BETWEEN" as const : filter.filterType === "MULTI_SELECT" ? "IN" as const : "EQ" as const;
-    return [{ businessFieldId: filter.businessFieldId, operator, values }];
+    return [{ businessFieldId: filter.businessFieldId, operator, values: normalizedValues }];
   });
 }
 

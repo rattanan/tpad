@@ -13,7 +13,7 @@ const rayLengths = [27, 21, 24, 18, 25, 20, 28, 22, 26, 19, 28, 21, 25, 18, 24, 
 export function IfsLogo({ className = "", markOnly = false, size = "md", variant = "dark" }: Props) {
   const gradientId = `ifs-logo-gradient-${useId().replaceAll(":", "")}`;
   const highlightId = `ifs-logo-highlight-${useId().replaceAll(":", "")}`;
-  return <span className={`${styles.root} ${styles[size]} ${styles[variant]} ${markOnly ? styles.markOnly : ""} ${className}`} role={markOnly ? "img" : undefined} aria-label={markOnly ? "IFS Insight" : undefined}>
+  return <span className={`${styles.root} ${styles[size]} ${styles[variant]} ${markOnly ? styles.markOnly : ""} ${className}`} role={markOnly ? "img" : undefined} aria-label={markOnly ? "InsightFS" : undefined}>
     <span className={styles.markShell} aria-hidden={!markOnly}>
       <svg className={styles.mark} viewBox="0 0 100 100" aria-hidden="true">
         <defs>
@@ -29,6 +29,6 @@ export function IfsLogo({ className = "", markOnly = false, size = "md", variant
         </g>
       </svg>
     </span>
-    {!markOnly && <span className={styles.wordmark}>IFS <strong>Insight</strong></span>}
+    {!markOnly && <span className={styles.wordmark}><strong>Insight</strong>FS</span>}
   </span>;
 }

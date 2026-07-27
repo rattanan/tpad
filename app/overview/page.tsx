@@ -21,7 +21,7 @@ export default async function OverviewPage() {
   return <main className="workspace-page overview-page">
     <section className="workspace-welcome"><div><p className="eyebrow">WORKSPACE OVERVIEW</p><h1>Good to see you, {firstName}.</h1><p>Follow the governed path from synchronized Oracle metadata to trusted business definitions, KPIs, and decision-ready dashboards.</p></div><div className="welcome-signal"><span/><div><strong>Platform operational</strong><small>{sources.connected} connected · {sources.synced} synchronized</small></div></div></section>
 
-    <section className="overview-pipeline" aria-label="IFS Insight asset summary">
+    <section className="overview-pipeline" aria-label="InsightFS asset summary">
       <Link href="/data-sources" className="overview-pipeline-card data"><span className="overview-card-icon">DB</span><div><small>DATA FOUNDATION</small><strong>{sources.total}</strong><p>Data sources</p><em>{sources.tables + sources.views} discovered objects</em></div><b>→</b></Link>
       <Link href="/business-context-models" className="overview-pipeline-card context"><span className="overview-card-icon">◇</span><div><small>BUSINESS MEANING</small><strong>{contexts.total}</strong><p>Business Context models</p><em>{publishedContexts} published</em></div><b>→</b></Link>
       <Link href="/kpi-catalogue" className="overview-pipeline-card kpi"><span className="overview-card-icon">KPI</span><div><small>GOVERNED MEASURES</small><strong>{kpis.length}</strong><p>KPI definitions</p><em>{productionKpis} approved or certified</em></div><b>→</b></Link>

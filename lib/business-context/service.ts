@@ -115,6 +115,28 @@ export async function getBusinessObject(id: string, user: AuthenticatedUser) {
   const item = (await db.select().from(businessObjects).where(and(eq(businessObjects.id, id), isNull(businessObjects.deletedAt))).limit(1))[0]; if (!item) throw new HttpError(404, "Business Object not found", "NOT_FOUND"); await requireBusinessContextPermission(user, item.dataSourceId, "BUSINESS_OBJECT_VIEW"); if (!maySeePhysicalMetadata(user)) { if (item.approvalStatus !== "APPROVED") throw new HttpError(404, "Business Object not found", "NOT_FOUND"); return omit(item, ["technicalName", "databaseSchema", "physicalTableId", "primaryKeyDefinition"] as const); } return item;
 }
 
+export async function archiveBusinessObject(id: string, user: AuthenticatedUser) {
+  const object = (await db.select().from(businessObjects).where(and(eq(businessObjects.id, id), isNull(businessObjects.deletedAt))).limit(1))[0];
+  if (!object) throw new HttpError(404, "Business Object not found", "NOT_FOUND");
+  const model = await requireModel(object.modelId);
+  await requireBusinessContextPermission(user, model.dataSourceId, "BUSINESS_OBJECT_MANAGE");
+  assertEditable(model.status);
+  const fields = await db.select({ id: businessFields.id }).from(businessFields).where(and(eq(businessFields.businessObjectId, id), isNull(businessFields.deletedAt)));
+  const fieldIds = fields.map((field) => field.id);
+  const [relationships, kpiSources, kpiFieldFilters] = await Promise.all([
+    db.select({ id: businessRelationships.id }).from(businessRelationships).where(and(isNull(businessRelationships.deletedAt), or(eq(businessRelationships.sourceObjectId, id), eq(businessRelationships.targetObjectId, id)))),
+    db.select({ id: kpiSourceFields.id }).from(kpiSourceFields).where(and(eq(kpiSourceFields.businessObjectId, id), isNull(kpiSourceFields.deletedAt))),
+    fieldIds.length ? db.select({ id: kpiFilters.id }).from(kpiFilters).where(and(inArray(kpiFilters.businessFieldId, fieldIds), isNull(kpiFilters.deletedAt))) : Promise.resolve([]),
+  ]);
+  if (relationships.length || kpiSources.length || kpiFieldFilters.length) throw new HttpError(409, "Cannot remove a Business Object used by a relationship or KPI definition", "OBJECT_IN_USE");
+  const timestamp = now();
+  await db.transaction(async (tx) => {
+    if (fieldIds.length) await tx.update(businessFields).set({ deletedAt: timestamp, updatedAt: timestamp, updatedBy: user.id }).where(inArray(businessFields.id, fieldIds));
+    await tx.update(businessObjects).set({ deletedAt: timestamp, updatedAt: timestamp, updatedBy: user.id }).where(eq(businessObjects.id, id));
+  });
+  return { id, businessName: object.businessName, removedFieldCount: fieldIds.length };
+}
+
 export async function listBusinessObjectFields(objectId: string, user: AuthenticatedUser) {
   await getBusinessObject(objectId, user); const rows = await db.select().from(businessFields).where(and(eq(businessFields.businessObjectId, objectId), isNull(businessFields.deletedAt))).orderBy(asc(businessFields.businessName)); if (maySeePhysicalMetadata(user)) return rows.map((item) => omit(item, ["exampleValues"] as const)); return rows.filter((item) => item.approvalStatus === "APPROVED" && item.visibleToDashboardCreator).map((item) => omit(item, ["physicalColumnName", "physicalColumnId", "physicalDataType", "exampleValues"] as const));
 }
@@ -200,8 +222,10 @@ export async function getBusinessContextWorkspace(id: string, user: Authenticate
     db.select().from(businessGlossaryTerms).where(and(eq(businessGlossaryTerms.modelId, id), isNull(businessGlossaryTerms.deletedAt))).orderBy(asc(businessGlossaryTerms.term)),
     db.select().from(businessContextReviewRequests).where(and(eq(businessContextReviewRequests.modelId, id), isNull(businessContextReviewRequests.deletedAt))).orderBy(desc(businessContextReviewRequests.requestedAt)),
   ]);
-  if (maySeePhysicalMetadata(user)) return { model, domains, objects, fields: fields.map((field) => ({ ...field, exampleValues: undefined })), relationships, kpis, recommendations, versions, glossary, reviews };
-  return { model, domains, objects: objects.filter((item) => item.approvalStatus === "APPROVED").map((item) => omit(item, ["technicalName", "databaseSchema", "physicalTableId", "primaryKeyDefinition"] as const)), fields: fields.filter((item) => item.approvalStatus === "APPROVED" && item.visibleToDashboardCreator).map((item) => omit(item, ["physicalColumnName", "physicalColumnId", "physicalDataType", "exampleValues"] as const)), relationships: relationships.filter((item) => item.approvalStatus === "APPROVED"), kpis: kpis.filter((item) => ["APPROVED", "CERTIFIED"].includes(item.status)).map((item) => omit(item, ["formulaAst"] as const)), recommendations: [], versions: versions.map((item) => omit(item, ["objectsSnapshot", "fieldsSnapshot", "relationshipsSnapshot", "kpisSnapshot", "glossarySnapshot"] as const)), glossary: glossary.filter((item) => item.approvalStatus === "APPROVED"), reviews: [] };
+  const objectNames = new Map(objects.map((object) => [object.id, object.businessName]));
+  const namedFields = fields.map((field) => ({ ...field, businessObjectName: objectNames.get(field.businessObjectId) ?? "Unknown object" }));
+  if (maySeePhysicalMetadata(user)) return { model, domains, objects, fields: namedFields.map((field) => ({ ...field, exampleValues: undefined })), relationships, kpis, recommendations, versions, glossary, reviews };
+  return { model, domains, objects: objects.filter((item) => item.approvalStatus === "APPROVED").map((item) => omit(item, ["technicalName", "databaseSchema", "physicalTableId", "primaryKeyDefinition"] as const)), fields: namedFields.filter((item) => item.approvalStatus === "APPROVED" && item.visibleToDashboardCreator).map((item) => omit(item, ["physicalColumnName", "physicalColumnId", "physicalDataType", "exampleValues"] as const)), relationships: relationships.filter((item) => item.approvalStatus === "APPROVED"), kpis: kpis.filter((item) => ["APPROVED", "CERTIFIED"].includes(item.status)).map((item) => omit(item, ["formulaAst"] as const)), recommendations: [], versions: versions.map((item) => omit(item, ["objectsSnapshot", "fieldsSnapshot", "relationshipsSnapshot", "kpisSnapshot", "glossarySnapshot"] as const)), glossary: glossary.filter((item) => item.approvalStatus === "APPROVED"), reviews: [] };
 }
 
 export async function createKpi(input: { modelId: string; code: string; name: string; shortName?: string; description?: string; businessObjective?: string; businessQuestion?: string; businessDomainId?: string; owner?: string; dataSteward?: string; tags?: string[]; measureType: "ADDITIVE" | "SEMI_ADDITIVE" | "NON_ADDITIVE" | "RATIO" | "COUNT"; formulaAst: FormulaNode; nullHandling: "ZERO" | "IGNORE" | "ERROR"; divisionByZeroHandling: "NULL" | "ZERO" | "ERROR"; decimalPrecision: number; unit?: string; currency?: string; defaultDateFieldId?: string; dateLogic?: unknown; recommendedVisualization?: string; displayFormat?: string }, user: AuthenticatedUser) {

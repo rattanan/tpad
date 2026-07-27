@@ -75,7 +75,7 @@ function HeroVisual() {
     <div className={`${styles.floatCard} ${styles.verifyFloat}`}><span className={styles.verified}>✓ Verified</span><small>Formula and source lineage available</small></div>
     <div className={`${styles.floatCard} ${styles.insightFloat}`}><i><IfsLogo markOnly size="xs"/></i><div><small>AI insight</small><strong>Unscheduled repairs explain 68% of the increase.</strong></div></div>
     <div className={styles.heroCopilot}>
-      <div className={styles.panelTop}><span><i><IfsLogo markOnly size="xs"/></i> IFS Insight Copilot</span><em>Governed</em></div>
+      <div className={styles.panelTop}><span><i><IfsLogo markOnly size="xs"/></i> InsightFS Copilot</span><em>Governed</em></div>
       <CopilotMessage role="You" compact>Why did maintenance cost increase this month?</CopilotMessage>
       <CopilotMessage role="AI" compact>Maintenance cost increased <b>12.4%</b>, mainly from unscheduled engine repairs and higher external service expenses.</CopilotMessage>
       <div className={styles.quickActions}><button>View supporting data</button><button>Explain calculation</button><button>Show source query</button><button>Create analysis</button></div>
@@ -86,7 +86,7 @@ function HeroVisual() {
 }
 
 function Header() {
-  return <header className={styles.siteHeader}><Link href="/" className={styles.logoLink} aria-label="IFS Insight home"><IfsLogo/></Link><nav aria-label="Public navigation"><a href="#copilot">AI Copilot</a><a href="#capabilities">Capabilities</a><a href="#security">Security</a><Link href="/login" className={styles.signIn}>Sign in</Link></nav></header>;
+  return <header className={styles.siteHeader}><Link href="/" className={styles.logoLink} aria-label="InsightFS home"><IfsLogo/></Link><nav aria-label="Public navigation"><a href="#copilot">AI Copilot</a><a href="#capabilities">Capabilities</a><a href="#security">Security</a><Link href="/login" className={styles.signIn}>Sign in</Link></nav></header>;
 }
 
 function HeroSection() {
@@ -100,7 +100,7 @@ function HeroSection() {
 }
 
 function CopilotSection() {
-  return <section id="copilot" className={`${styles.section} ${styles.copilotSection}`}><SectionHeading eyebrow="CONVERSATIONAL ANALYTICS" title={<>Ask your dashboard.<br/><em>Understand the answer.</em></>} description="IFS Insight AI Copilot lets users explore dashboard data through natural conversation. Ask follow-up questions, inspect calculations, compare periods, identify root causes, and turn insights into action."/>
+  return <section id="copilot" className={`${styles.section} ${styles.copilotSection}`}><SectionHeading eyebrow="CONVERSATIONAL ANALYTICS" title={<>Ask your dashboard.<br/><em>Understand the answer.</em></>} description="InsightFS AI Copilot lets users explore dashboard data through natural conversation. Ask follow-up questions, inspect calculations, compare periods, identify root causes, and turn insights into action."/>
     <div className={styles.twoColumn}><div className={styles.conversationPanel}>
       <div className={styles.panelTop}><span><i><IfsLogo markOnly size="xs"/></i> Fleet operations</span><em>Live context</em></div>
       <CopilotMessage role="You">Is this Fleet Readiness KPI correct?</CopilotMessage>
@@ -120,7 +120,7 @@ function VerificationPanel() {
 }
 
 function TrustSection() {
-  return <section id="trust" className={`${styles.section} ${styles.trustSection}`}><SectionHeading eyebrow="EXPLAINABLE BY DESIGN" title={<>Trust every number.<br/><em>Verify every answer.</em></>} description="AI answers should never be a black box. IFS Insight provides evidence, calculation details, source lineage, and validation checks for every important result." centered/>
+  return <section id="trust" className={`${styles.section} ${styles.trustSection}`}><SectionHeading eyebrow="EXPLAINABLE BY DESIGN" title={<>Trust every number.<br/><em>Verify every answer.</em></>} description="AI answers should never be a black box. InsightFS provides evidence, calculation details, source lineage, and validation checks for every important result." centered/>
     <div className={styles.workflow}>{workflow.map(([number, title, detail], index) => <article key={number}><span>{number}</span><i>{index === 0 ? "?" : index === 1 ? "◇" : index === 2 ? "✓" : "✦"}</i><h3>{title}</h3><p>{detail}</p>{index < workflow.length - 1 && <b aria-hidden="true">→</b>}</article>)}</div><VerificationPanel/>
   </section>;
 }
@@ -142,12 +142,12 @@ function InsightCard({ item, index }: { item: typeof insights[number]; index: nu
 }
 
 function InsightsSection() {
-  return <section className={`${styles.section} ${styles.insightsSection}`}><SectionHeading eyebrow="PROACTIVE INTELLIGENCE" title={<>Your dashboard shows what happened.<br/><em>AI explains why.</em></>} description="IFS Insight continuously analyzes dashboard metrics to detect trends, unusual changes, risks, opportunities, and recommended next steps." centered inverse/><div className={styles.insightGrid}>{insights.map((item, index) => <InsightCard key={item.type} item={item} index={index}/>)}</div></section>;
+  return <section className={`${styles.section} ${styles.insightsSection}`}><SectionHeading eyebrow="PROACTIVE INTELLIGENCE" title={<>Your dashboard shows what happened.<br/><em>AI explains why.</em></>} description="InsightFS continuously analyzes dashboard metrics to detect trends, unusual changes, risks, opportunities, and recommended next steps." centered inverse/><div className={styles.insightGrid}>{insights.map((item, index) => <InsightCard key={item.type} item={item} index={index}/>)}</div></section>;
 }
 
 function AdvisorSection() {
   return <section className={`${styles.section} ${styles.advisorSection}`}><div><SectionHeading eyebrow="BUSINESS ADVISOR" title={<>From data questions<br/><em>to business guidance.</em></>} description="Use AI as a business advisor that understands your KPIs, operations, constraints, and historical performance."/><div className={styles.promptCloud}>{promptSuggestions.map((prompt) => <button key={prompt}>{prompt}<span>↗</span></button>)}</div></div>
-    <article className={styles.advisorResponse}><div className={styles.advisorTop}><span><IfsLogo markOnly size="sm"/></span><div><small>IFS INSIGHT ADVISOR</small><strong>Management briefing</strong></div><em>Based on governed data</em></div><p>“Fleet readiness declined primarily because of extended engine maintenance and delayed spare-part delivery. Management should prioritize three aircraft representing <b>61% of the readiness impact.</b>”</p><h3>Recommended actions</h3><ol><li><span>1</span>Escalate two delayed suppliers</li><li><span>2</span>Reallocate specialized technicians</li><li><span>3</span>Review high-duration work orders</li><li><span>4</span>Monitor readiness daily for seven days</li></ol><button>Open full analysis <span>→</span></button></article>
+    <article className={styles.advisorResponse}><div className={styles.advisorTop}><span><IfsLogo markOnly size="sm"/></span><div><small>INSIGHTFS ADVISOR</small><strong>Management briefing</strong></div><em>Based on governed data</em></div><p>“Fleet readiness declined primarily because of extended engine maintenance and delayed spare-part delivery. Management should prioritize three aircraft representing <b>61% of the readiness impact.</b>”</p><h3>Recommended actions</h3><ol><li><span>1</span>Escalate two delayed suppliers</li><li><span>2</span>Reallocate specialized technicians</li><li><span>3</span>Review high-duration work orders</li><li><span>4</span>Monitor readiness daily for seven days</li></ol><button>Open full analysis <span>→</span></button></article>
   </section>;
 }
 
@@ -166,7 +166,7 @@ function FinalCTA() {
 }
 
 function Footer() {
-  return <footer className={styles.footer}><Link href="/" className={styles.logoLink} aria-label="IFS Insight home"><IfsLogo size="sm"/></Link><p>AI Decision Intelligence for Oracle and IFS.</p><nav aria-label="Footer navigation"><a href="#copilot">AI Copilot</a><a href="#trust">Trust</a><a href="#security">Security</a></nav><small>© 2026 IFS Insight</small></footer>;
+  return <footer className={styles.footer}><Link href="/" className={styles.logoLink} aria-label="InsightFS home"><IfsLogo size="sm"/></Link><p>AI Decision Intelligence for Oracle and IFS.</p><nav aria-label="Footer navigation"><a href="#copilot">AI Copilot</a><a href="#trust">Trust</a><a href="#security">Security</a></nav><small>© 2026 InsightFS</small></footer>;
 }
 
 export function LandingPage() {

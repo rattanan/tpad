@@ -1,12 +1,16 @@
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { businessFields, businessObjects, kpiDefinitions } from "@/lib/db/schema";
+import { businessFields, businessObjects, dataSourceColumns, dataSourceTables, kpiDefinitions } from "@/lib/db/schema";
 import type { AuthenticatedUser } from "@/lib/auth/session";
 import { HttpError } from "@/lib/http";
+import { checkColumnsHaveData, profileTableColumns } from "@/lib/data-sources/preview";
 import { assertEditable, requireBusinessContextPermission } from "./permissions";
-import { createKpi, requireModel, updateBusinessField } from "./service";
+import { createBusinessObject, createKpi, requireModel, updateBusinessField } from "./service";
 import { sanitizeMetadataText } from "./security";
+import { findMeasureColumns, isLikelyMasterOnlyObject, normalizeObjectSuggestions } from "./object-suggestion";
+import { normalizeKpiSuggestions } from "./kpi-suggestion";
+import { classifyBusinessField, profileExclusionReasons, type ColumnProfile } from "./column-profile";
 
 const descriptionSchema = z.object({ description: z.string().trim().min(10).max(600) }).strict();
 const kpiSuggestionSchema = z.object({ kpis: z.array(z.object({
@@ -14,7 +18,16 @@ const kpiSuggestionSchema = z.object({ kpis: z.array(z.object({
   businessObjective: z.string().trim().max(1000).optional(), businessQuestion: z.string().trim().max(1000).optional(), fieldId: z.string().uuid(),
   aggregation: z.enum(["SUM", "AVERAGE", "COUNT", "COUNT_DISTINCT", "MINIMUM", "MAXIMUM"]), measureType: z.enum(["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE", "RATIO", "COUNT"]),
   unit: z.string().trim().max(80).optional(), recommendedVisualization: z.string().trim().max(80).optional(),
+  denominatorFieldId: z.string().uuid().optional(), denominatorAggregation: z.enum(["SUM", "AVERAGE", "COUNT", "COUNT_DISTINCT", "MINIMUM", "MAXIMUM"]).optional(),
+  usefulDimensionFieldIds: z.array(z.string()).max(8).default([]), confidenceScore: z.number().min(0).max(100).default(70), evidence: z.array(z.string().max(300)).max(8).default([]), warnings: z.array(z.string().max(300)).max(8).default([]),
 }).strict()).min(1).max(8) }).strict();
+
+const kpiAnalysisSchema = z.object({
+  businessProcess: z.string().trim().max(1000).optional(), rowGrain: z.string().trim().max(1000).optional(),
+  importantEntities: z.array(z.string().trim().max(255)).max(20).default([]), recommendedDimensions: z.array(z.string().trim().max(255)).max(30).default([]),
+  recommendedMeasures: z.array(z.string().trim().max(255)).max(30).default([]), businessQuestions: z.array(z.string().trim().max(500)).max(20).default([]),
+  recommendedVisualizations: z.array(z.string().trim().max(255)).max(20).default([]), dataQualityWarnings: z.array(z.string().trim().max(500)).max(30).default([]),
+}).passthrough();
 
 type AiBody = { output_text?: string; output?: Array<{ content?: Array<{ text?: string }> }>; choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } };
 
@@ -59,6 +72,50 @@ function fallbackDescription(field: { businessName: string; businessType: string
   return `${field.businessName} represents the ${field.businessType.toLowerCase()} value used as a ${role} for ${objectName}.`;
 }
 
+function businessName(value: string) {
+  return value.replace(/_TAB$/i, "").split("_").filter(Boolean).map((part) => part[0] + part.slice(1).toLowerCase()).join(" ");
+}
+
+export async function generateDraftBusinessObjectsWithAi(modelId: string, user: AuthenticatedUser) {
+  const model = await requireModel(modelId);
+  await requireBusinessContextPermission(user, model.dataSourceId, "BUSINESS_OBJECT_MANAGE");
+  assertEditable(model.status);
+  const [mapped, tables] = await Promise.all([
+    // Include archived mappings: removing a generated object is also a decision
+    // that the same physical table must not be suggested again automatically.
+    db.select({ tableId: businessObjects.physicalTableId }).from(businessObjects).where(eq(businessObjects.modelId, modelId)),
+    db.select({ id: dataSourceTables.id, tableName: dataSourceTables.tableName, businessName: dataSourceTables.businessName, description: dataSourceTables.description, objectType: dataSourceTables.objectType, estimatedRowCount: dataSourceTables.estimatedRowCount }).from(dataSourceTables).where(and(eq(dataSourceTables.dataSourceId, model.dataSourceId), eq(dataSourceTables.schemaName, model.schemaName), eq(dataSourceTables.isIncluded, true), eq(dataSourceTables.status, "ACTIVE"))).orderBy(asc(dataSourceTables.tableName)),
+  ]);
+  const mappedIds = new Set(mapped.map((item) => item.tableId));
+  const unmapped = tables.filter((table) => !mappedIds.has(table.id)).slice(0, 240);
+  if (!unmapped.length) throw new HttpError(409, "No unmapped tables or views are available in this Business Context schema", "NO_AVAILABLE_TABLES");
+  const columns = await db.select({ tableId: dataSourceColumns.tableId, columnName: dataSourceColumns.columnName, dataType: dataSourceColumns.dataType, isPrimaryKey: dataSourceColumns.isPrimaryKey, isForeignKey: dataSourceColumns.isForeignKey, sensitivityType: dataSourceColumns.sensitivityType }).from(dataSourceColumns).where(and(inArray(dataSourceColumns.tableId, unmapped.map((table) => table.id)), eq(dataSourceColumns.isIncluded, true), eq(dataSourceColumns.status, "ACTIVE")));
+  const columnsByTable = new Map<string, typeof columns>();
+  for (const column of columns) columnsByTable.set(column.tableId, [...(columnsByTable.get(column.tableId) ?? []), column]);
+  const candidates = unmapped.filter((table) => !isLikelyMasterOnlyObject(table.tableName)).map((table) => ({ ...table, measureColumns: findMeasureColumns(columnsByTable.get(table.id) ?? []).slice(0, 20) })).filter((table) => table.measureColumns.length > 0);
+  const skippedNonMeasureCount = unmapped.length - candidates.length;
+  if (!candidates.length) throw new HttpError(409, "No unmapped tables or views with usable Measure fields are available; master-only objects were excluded", "NO_MEASURE_TABLES");
+  const safeContext = { context: { name: sanitizeMetadataText(model.name, 190), description: sanitizeMetadataText(model.description, 500) }, tables: candidates.map((table) => ({ id: table.id, name: table.tableName, businessName: sanitizeMetadataText(table.businessName, 255), description: sanitizeMetadataText(table.description, 500), type: table.objectType, rowCountKnownPositive: typeof table.estimatedRowCount === "number" ? table.estimatedRowCount > 0 : null, measureFields: table.measureColumns.map((column) => ({ name: sanitizeMetadataText(column.columnName, 128), dataType: column.dataType })) })) };
+  const generated = await requestStructuredAi("Select 1-8 transactional, event, snapshot, or aggregate physical tables/views relevant to the supplied Business Context and propose Draft Business Object metadata. Every listed candidate contains at least one server-detected Measure field. Reject Master Data, Reference Data, lookup, type, category, status, and configuration objects even when they contain numeric IDs or codes. Use only listed table IDs and measure fields as evidence. Do not invent tables, columns, row values, SQL, or business rules. Prefer candidates whose rowCountKnownPositive is true; the server will independently verify Measure data. Return JSON with key objects; each item has tableId, businessName, description, optional recordGrain, and objectType. Never return objectType MASTER_DATA or REFERENCE_DATA.", safeContext);
+  const fallback = { objects: candidates.filter((table) => table.estimatedRowCount !== 0).slice(0, 6).map((table) => ({ tableId: table.id, businessName: table.businessName || businessName(table.tableName), description: `${table.businessName || businessName(table.tableName)} contains measurable records relevant to ${model.name}.`, objectType: table.objectType === "VIEW" ? "VIEW" as const : "TRANSACTION" as const })) };
+  let suggestions;
+  try { suggestions = normalizeObjectSuggestions(generated ?? fallback, candidates).objects.filter((item) => !["MASTER_DATA", "REFERENCE_DATA"].includes(item.objectType)); }
+  catch { suggestions = normalizeObjectSuggestions(fallback, candidates).objects; }
+  if (!suggestions.length) suggestions = normalizeObjectSuggestions(fallback, candidates).objects;
+  const allowed = new Map(candidates.map((table) => [table.id, table]));
+  const created = []; let skippedEmptyCount = 0;
+  for (const suggestion of suggestions) {
+    const table = allowed.get(suggestion.tableId);
+    if (!table) continue;
+    let measureData: Record<string, boolean>;
+    try { measureData = await checkColumnsHaveData(model.dataSourceId, table.id, table.measureColumns.map((column) => column.columnName)); } catch { throw new HttpError(502, "Measure data availability could not be verified. Check the Data Source connection and retry.", "DATA_AVAILABILITY_CHECK_FAILED"); }
+    if (!Object.values(measureData).some(Boolean)) { skippedEmptyCount += 1; continue; }
+    created.push(await createBusinessObject(modelId, { physicalTableId: table.id, businessName: sanitizeMetadataText(suggestion.businessName, 255), description: sanitizeMetadataText(suggestion.description, 1000), recordGrain: sanitizeMetadataText(suggestion.recordGrain, 500), objectType: suggestion.objectType, mapFields: true, aiUsageAllowed: true, notes: "Generated by governed AI assistance; human review required." }, user));
+  }
+  if (!created.length) throw new HttpError(409, "AI suggestions did not include any relevant tables or views with populated Measure fields", "NO_TABLES_WITH_MEASURE_DATA");
+  return { createdCount: created.length, skippedEmptyCount, skippedNonMeasureCount, objects: created.map((item) => ({ id: item.id, businessName: item.businessName, approvalStatus: item.approvalStatus })) };
+}
+
 export async function generateBusinessFieldDescription(fieldId: string, user: AuthenticatedUser) {
   const field = (await db.select().from(businessFields).where(and(eq(businessFields.id, fieldId), isNull(businessFields.deletedAt))).limit(1))[0];
   if (!field) throw new HttpError(404, "Business Field not found", "NOT_FOUND");
@@ -74,7 +131,7 @@ export async function generateBusinessFieldDescription(fieldId: string, user: Au
 }
 
 function safeCode(value: string) {
-  const code = value.toUpperCase().replace(/[^A-Z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80);
+  const code = value.toUpperCase().replace(/[^A-Z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80) || "KPI";
   return /^[A-Z]/.test(code) ? code : `KPI_${code}`.slice(0, 80);
 }
 
@@ -90,22 +147,60 @@ export async function generateDraftKpisWithAi(modelId: string, user: Authenticat
   await requireBusinessContextPermission(user, model.dataSourceId, "KPI_CREATE");
   assertEditable(model.status);
   const [objects, fields, existing] = await Promise.all([
-    db.select({ id: businessObjects.id, businessName: businessObjects.businessName, description: businessObjects.description, recordGrain: businessObjects.recordGrain }).from(businessObjects).where(and(eq(businessObjects.modelId, modelId), isNull(businessObjects.deletedAt))).orderBy(asc(businessObjects.businessName)),
-    db.select({ id: businessFields.id, businessObjectId: businessFields.businessObjectId, businessName: businessFields.businessName, description: businessFields.description, businessType: businessFields.businessType, fieldRole: businessFields.fieldRole, aggregationRule: businessFields.aggregationRule, unit: businessFields.unit }).from(businessFields).where(and(eq(businessFields.modelId, modelId), eq(businessFields.aiUsageAllowed, true), eq(businessFields.sensitivityClassification, "NONE"), isNull(businessFields.deletedAt))).orderBy(asc(businessFields.businessName)),
+    db.select({ id: businessObjects.id, physicalTableId: businessObjects.physicalTableId, businessName: businessObjects.businessName, description: businessObjects.description, recordGrain: businessObjects.recordGrain }).from(businessObjects).where(and(eq(businessObjects.modelId, modelId), isNull(businessObjects.deletedAt))).orderBy(asc(businessObjects.businessName)),
+    db.select({ id: businessFields.id, businessObjectId: businessFields.businessObjectId, physicalColumnName: businessFields.physicalColumnName, physicalDataType: businessFields.physicalDataType, businessName: businessFields.businessName, description: businessFields.description, businessType: businessFields.businessType, fieldRole: businessFields.fieldRole, aggregationRule: businessFields.aggregationRule, unit: businessFields.unit, isPrimaryKey: businessFields.isPrimaryKey, isForeignKey: businessFields.isForeignKey, aiUsageAllowed: businessFields.aiUsageAllowed }).from(businessFields).where(and(eq(businessFields.modelId, modelId), eq(businessFields.sensitivityClassification, "NONE"), isNull(businessFields.deletedAt))).orderBy(asc(businessFields.businessName)),
     db.select({ code: kpiDefinitions.code, name: kpiDefinitions.name }).from(kpiDefinitions).where(and(eq(kpiDefinitions.modelId, modelId), isNull(kpiDefinitions.deletedAt))),
   ]);
-  const eligible = fields.filter((field) => field.fieldRole === "MEASURE" || field.fieldRole === "IDENTIFIER");
-  if (!eligible.length) throw new HttpError(409, "No eligible Measure or Identifier fields are available for KPI generation", "NO_ELIGIBLE_FIELDS");
-  const safeContext = { model: { name: sanitizeMetadataText(model.name, 190), description: sanitizeMetadataText(model.description, 500) }, objects: objects.map((item) => ({ id: item.id, name: sanitizeMetadataText(item.businessName, 255), description: sanitizeMetadataText(item.description, 500), recordGrain: sanitizeMetadataText(item.recordGrain, 500) })), fields: eligible.map((item) => ({ id: item.id, objectId: item.businessObjectId, name: sanitizeMetadataText(item.businessName, 255), description: sanitizeMetadataText(item.description, 500), type: item.businessType, role: item.fieldRole, aggregation: item.aggregationRule, unit: item.unit })), existingKpis: existing.map((item) => ({ code: item.code, name: sanitizeMetadataText(item.name, 255) })) };
-  const generated = await requestStructuredAi("Create 1-8 useful Draft KPI definitions from the supplied governed Business Context. Use only listed field IDs. Prefer MEASURE fields; use COUNT_DISTINCT for identifiers. Do not invent SQL, fields, data, targets, or results. Return JSON with key kpis; every KPI must contain code, name, description, businessObjective, businessQuestion, fieldId, aggregation, measureType, optional unit, and recommendedVisualization.", safeContext);
-  const suggestions = kpiSuggestionSchema.parse(generated ?? fallbackKpis(eligible)).kpis;
+  const profiles = new Map<string, ColumnProfile>();
+  const profilingWarnings: string[] = [];
+  for (const object of objects) {
+    const allowedObjectFields = fields.filter((field) => field.businessObjectId === object.id && field.aiUsageAllowed);
+    const objectFields = allowedObjectFields.filter((field) => !/BLOB|CLOB|LONG|XMLTYPE|RAW/i.test(field.physicalDataType)).slice(0, 120);
+    if (!objectFields.length) continue;
+    try {
+      const result = await profileTableColumns(model.dataSourceId, object.physicalTableId, objectFields.map((field) => field.physicalColumnName));
+      objectFields.forEach((field) => { const profile = result[field.physicalColumnName]; if (profile) profiles.set(field.id, profile); });
+      if (fields.filter((field) => field.businessObjectId === object.id && field.aiUsageAllowed).length > 120) profilingWarnings.push(`${object.businessName}: profiling was limited to the first 120 AI-allowed fields.`);
+      if (objectFields.length < allowedObjectFields.length && allowedObjectFields.some((field) => /BLOB|CLOB|LONG|XMLTYPE|RAW/i.test(field.physicalDataType))) profilingWarnings.push(`${object.businessName}: large-object and binary fields were excluded from profiling.`);
+    } catch { profilingWarnings.push(`${object.businessName}: the live data profile could not be completed.`); }
+  }
+  const classified = fields.map((field) => {
+    const profile = profiles.get(field.id);
+    const classification = classifyBusinessField(field);
+    const exclusionReasons = [...(!field.aiUsageAllowed ? ["AI usage is not allowed"] : []), ...(profile ? profileExclusionReasons(field, profile) : ["data profile is unavailable"] )];
+    return { ...field, profile, classification, exclusionReasons };
+  });
+  const measureClasses = new Set(["numeric_measure", "monetary_measure", "duration_measure"]);
+  const eligible = classified.filter((field) => field.aiUsageAllowed && field.profile && !field.exclusionReasons.length && (measureClasses.has(field.classification) || (field.classification === "identifier" && (field.isPrimaryKey || field.fieldRole === "IDENTIFIER") && !field.isForeignKey)));
+  const dimensions = classified.filter((field) => field.aiUsageAllowed && field.profile && !field.exclusionReasons.length && ["status_dimension", "categorical_dimension", "date_dimension"].includes(field.classification));
+  if (!eligible.length) throw new HttpError(409, "No fields contain sufficiently complete and varying data for KPI generation", "NO_PROFILED_MEASURES");
+  const safeContext = {
+    model: { name: sanitizeMetadataText(model.name, 190), description: sanitizeMetadataText(model.description, 500) },
+    objects: objects.map((item) => ({ id: item.id, name: sanitizeMetadataText(item.businessName, 255), description: sanitizeMetadataText(item.description, 500), rowGrain: sanitizeMetadataText(item.recordGrain, 500) })),
+    fields: classified.map((item) => ({ id: item.id, objectId: item.businessObjectId, name: sanitizeMetadataText(item.businessName, 255), column: sanitizeMetadataText(item.physicalColumnName, 128), description: sanitizeMetadataText(item.description, 500), type: item.businessType, declaredRole: item.fieldRole, analyticalClassification: item.classification, aggregation: item.aggregationRule, unit: item.unit, profile: item.profile ? { ...item.profile, sampleValues: item.profile.sampleValues.map((value) => sanitizeMetadataText(value, 120)) } : null, excludedFromKpis: item.exclusionReasons })),
+    eligibleMeasureFieldIds: eligible.map((item) => item.id), usefulDimensionFieldIds: dimensions.map((item) => item.id), existingKpis: existing.map((item) => ({ code: item.code, name: sanitizeMetadataText(item.name, 255) })), profilingWarnings,
+  };
+  const generated = await requestStructuredAi(`You are an enterprise business intelligence analyst specializing in Oracle and IFS ERP data. Analyze the supplied table metadata and sampled data profiles before proposing KPIs. First determine the business process, row grain, and primary entities. Classify fields as identifier, status dimension, categorical dimension, date dimension, numeric measure, monetary measure, duration measure, technical metadata, or unusable. Do not generate KPIs from column names alone. Exclude fields marked by the server because they are all-null, all-zero, constant, zero-variance, at least 98% null, technical, unavailable, or non-aggregatable identifiers. STATE, MCH_CODE_DESCRIPTION, and other categorical fields are dimensions, never numeric KPIs. Propose only KPIs supported by available and varying data and never invent unavailable fields or formulas. Prefer meaningful combinations such as ratios when both required measures exist over one KPI per column. For Active Work Order data, prioritize work-order volume, status/backlog, aging, overdue work, equipment workload, repeated maintenance, completion performance, and planned-versus-actual effort or cost only when supported. Return JSON with {analysis,kpis}. analysis contains businessProcess,rowGrain,importantEntities,recommendedDimensions,recommendedMeasures,businessQuestions,recommendedVisualizations,dataQualityWarnings. Each KPI contains code,name,description,businessObjective,businessQuestion,fieldId,aggregation,optional denominatorFieldId and denominatorAggregation,measureType,unit,recommendedVisualization,usefulDimensionFieldIds,confidenceScore,evidence, and warnings. Use only supplied field IDs.`, safeContext);
+  const fallback = fallbackKpis(eligible);
+  const normalizedFallback = normalizeKpiSuggestions(fallback, eligible);
+  let suggestions;
+  try {
+    const normalized = normalizeKpiSuggestions(generated ?? fallback, eligible);
+    suggestions = kpiSuggestionSchema.parse(normalized.kpis.length ? normalized : normalizedFallback).kpis;
+  } catch {
+    suggestions = kpiSuggestionSchema.parse(normalizedFallback).kpis;
+  }
   const allowed = new Map(eligible.map((field) => [field.id, field]));
+  const dimensionMap = new Map(dimensions.map((field) => [field.id, field]));
   const usedCodes = new Set(existing.map((item) => item.code));
   const usedNames = new Set(existing.map((item) => item.name.toLowerCase()));
   const created = [];
   for (const suggestion of suggestions) {
     const field = allowed.get(suggestion.fieldId);
     if (!field) continue;
+    const fieldProfile = field.profile!;
+    const denominator = suggestion.denominatorFieldId ? allowed.get(suggestion.denominatorFieldId) : undefined;
+    const usableDenominator = denominator?.businessObjectId === field.businessObjectId ? denominator : undefined;
     const countOnly = field.fieldRole === "IDENTIFIER" || !["NUMBER", "CURRENCY", "PERCENTAGE", "DURATION", "QUANTITY"].includes(field.businessType);
     const aggregation = countOnly ? (suggestion.aggregation === "COUNT" ? "COUNT" : "COUNT_DISTINCT") : suggestion.aggregation;
     const baseCode = safeCode(suggestion.code);
@@ -113,12 +208,21 @@ export async function generateDraftKpisWithAi(modelId: string, user: Authenticat
     let suffix = 2;
     while (usedCodes.has(code)) code = `${baseCode.slice(0, 76)}_${suffix++}`;
     if (usedNames.has(suggestion.name.toLowerCase())) continue;
-    const measureType = aggregation.startsWith("COUNT") ? "COUNT" as const : aggregation === "SUM" ? "ADDITIVE" as const : "NON_ADDITIVE" as const;
-    const kpi = await createKpi({ modelId, code, name: sanitizeMetadataText(suggestion.name, 255), description: sanitizeMetadataText(suggestion.description, 1000), businessObjective: sanitizeMetadataText(suggestion.businessObjective, 1000), businessQuestion: sanitizeMetadataText(suggestion.businessQuestion, 1000), tags: ["AI_DRAFT"], measureType, formulaAst: { type: "aggregate", function: aggregation, expression: { type: "field", businessFieldId: field.id } }, nullHandling: "IGNORE", divisionByZeroHandling: "NULL", decimalPrecision: 2, unit: suggestion.unit ?? field.unit ?? undefined, recommendedVisualization: suggestion.recommendedVisualization ?? "KPI card" }, user);
+    const measureType = usableDenominator ? "RATIO" as const : aggregation.startsWith("COUNT") ? "COUNT" as const : aggregation === "SUM" ? "ADDITIVE" as const : "NON_ADDITIVE" as const;
+    const usefulDimensions = suggestion.usefulDimensionFieldIds.map((id) => dimensionMap.get(id)).filter((item): item is NonNullable<typeof item> => Boolean(item));
+    const evidence = suggestion.evidence.length ? `Evidence: ${suggestion.evidence.join("; ")}` : `Evidence: ${fieldProfile.nonNullCount}/${fieldProfile.sampleSize} sampled rows are populated with ${fieldProfile.distinctCount} distinct values.`;
+    const warnings = [...suggestion.warnings, ...(usableDenominator ? [] : suggestion.denominatorFieldId ? ["Requested ratio denominator was outside the same governed business object and was omitted."] : []), ...profilingWarnings];
+    const description = [suggestion.description, evidence, usefulDimensions.length ? `Useful dimensions: ${usefulDimensions.map((item) => item.businessName).join(", ")}` : "", warnings.length ? `Limitations: ${warnings.join("; ")}` : ""].filter(Boolean).join("\n\n");
+    const formulaAst = usableDenominator ? { type: "ratio" as const, numerator: { type: "aggregate" as const, function: aggregation, expression: { type: "field" as const, businessFieldId: field.id } }, denominator: { type: "aggregate" as const, function: suggestion.denominatorAggregation ?? "SUM" as const, expression: { type: "field" as const, businessFieldId: usableDenominator.id } } } : { type: "aggregate" as const, function: aggregation, expression: { type: "field" as const, businessFieldId: field.id } };
+    const dateDimension = usefulDimensions.find((item) => item.classification === "date_dimension" && item.businessObjectId === field.businessObjectId);
+    const kpi = await createKpi({ modelId, code, name: sanitizeMetadataText(suggestion.name, 255), description: sanitizeMetadataText(description, 1000), businessObjective: sanitizeMetadataText(suggestion.businessObjective, 1000), businessQuestion: sanitizeMetadataText(suggestion.businessQuestion, 1000), tags: ["AI_DRAFT", `AI_CONFIDENCE_${Math.round(suggestion.confidenceScore)}`], measureType, formulaAst, nullHandling: "IGNORE", divisionByZeroHandling: "NULL", decimalPrecision: 2, unit: suggestion.unit ?? field.unit ?? undefined, defaultDateFieldId: dateDimension?.id, recommendedVisualization: suggestion.recommendedVisualization ?? "KPI card" }, user);
     created.push(kpi);
     usedCodes.add(code);
     usedNames.add(suggestion.name.toLowerCase());
   }
   if (!created.length) throw new HttpError(409, "AI did not produce any new KPI drafts after governance checks", "NO_NEW_KPIS");
-  return { createdCount: created.length, kpis: created.map((item) => ({ id: item.id, code: item.code, name: item.name, status: item.status })) };
+  const rawAnalysis = generated && typeof generated === "object" ? ((generated as Record<string, unknown>).analysis ?? generated) : {};
+  const parsedAnalysis = kpiAnalysisSchema.safeParse(rawAnalysis);
+  const analysis = { ...(parsedAnalysis.success ? parsedAnalysis.data : { businessProcess: model.description || model.name, rowGrain: objects.map((item) => item.recordGrain).filter(Boolean).join("; "), importantEntities: objects.map((item) => item.businessName), recommendedDimensions: dimensions.slice(0, 12).map((item) => item.businessName), recommendedMeasures: eligible.slice(0, 12).map((item) => item.businessName), businessQuestions: created.map((item) => item.businessQuestion).filter((item): item is string => Boolean(item)), recommendedVisualizations: created.map((item) => item.recommendedVisualization).filter((item): item is string => Boolean(item)), dataQualityWarnings: profilingWarnings }), excludedColumns: classified.filter((item) => item.exclusionReasons.length).map((item) => ({ field: item.businessName, column: item.physicalColumnName, classification: item.classification, reasons: item.exclusionReasons })).slice(0, 80) };
+  return { createdCount: created.length, checkedFieldCount: fields.length, profiledFieldCount: profiles.size, eligibleFieldCount: eligible.length, excludedFieldCount: classified.filter((item) => item.exclusionReasons.length).length, skippedEmptyFieldCount: classified.filter((item) => item.exclusionReasons.some((reason) => reason.includes("null"))).length, analysis, kpis: created.map((item) => ({ id: item.id, code: item.code, name: item.name, status: item.status })) };
 }

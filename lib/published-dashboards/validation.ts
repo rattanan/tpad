@@ -5,6 +5,10 @@ export const portalSortSchema = z.enum(["featured", "recent", "name", "popular"]
 export const runtimeFilterValueSchema = z.union([z.string().max(1000), z.number().finite(), z.boolean(), z.null()]);
 export const runtimeFiltersSchema = z.array(z.object({ filterId: z.string().uuid(), values: z.array(runtimeFilterValueSchema).max(100) }).strict()).max(20);
 export const widgetRequestSchema = z.object({ filters: runtimeFiltersSchema.default([]) }).strict();
+export const filterOptionsQuerySchema = z.object({
+  search: z.string().trim().max(200).default(""), page: z.coerce.number().int().min(1).max(1000).default(1), pageSize: z.coerce.number().int().min(1).max(50).default(30),
+  parentFilters: z.string().max(10_000).default("[]").transform((value, context) => { try { return runtimeFiltersSchema.parse(JSON.parse(value)); } catch { context.addIssue({ code: "custom", message: "Invalid parent filters" }); return z.NEVER; } }),
+}).strict();
 export const copilotRequestSchema = z.object({
   dashboardSlug: z.string().trim().min(1).max(190),
   conversationId: z.string().uuid().optional(),

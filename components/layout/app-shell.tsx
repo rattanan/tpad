@@ -52,6 +52,6 @@ export default function AppShell({ user, children }: { user: { fullName: string;
       <nav aria-label="Main navigation">{group("WORKSPACE", workspace)}{group("ADMINISTRATION", admin)}{group("ACCOUNT", account)}</nav>
       <div className="shell-account"><span className="shell-avatar">{initials}</span><div><strong>{user.fullName}</strong><small>{roleLabels[user.role]}</small></div><button onClick={logout} disabled={loggingOut} aria-label="Sign out" title="Sign out"><Icon name="logout"/></button></div>
     </aside>
-    <section className="insight-main"><header className="insight-topbar"><div><span className="topbar-brand-mark"><IfsLogo markOnly size="xs"/></span><span>IFS Insight</span><i>/</i><strong>{title}</strong></div><div className="shell-user"><span className="shell-role">{roleLabels[user.role]}</span><span className="shell-avatar">{initials}</span></div></header>{children}</section>
+    <section className="insight-main"><header className="insight-topbar"><div><span className="topbar-brand-mark"><IfsLogo markOnly size="xs"/></span><span>InsightFS</span><i>/</i><strong>{title}</strong></div><div className="shell-user"><span className="shell-role">{roleLabels[user.role]}</span><span className="shell-avatar">{initials}</span></div></header>{children}</section>
   </div>;
 }

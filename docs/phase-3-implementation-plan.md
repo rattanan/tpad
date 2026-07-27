@@ -3,7 +3,7 @@
 ## Current architecture
 
 - **Framework:** Next.js 16.2 App Router with React 19 and TypeScript. Pages are server components by default; interactive forms and workspaces are client components. Dynamic route parameters are asynchronous, following the installed Next.js 16 conventions.
-- **UI:** Tailwind CSS 4 plus project-owned CSS and React components. The authenticated `AppShell` provides the IFS Insight sidebar, top bar, role-aware navigation, and responsive mobile behavior. The repository does not currently include shadcn/Radix, a graph library, or a notification package, so Phase 3 will reuse the existing visual language and implement focused accessible components without adding a large dependency.
+- **UI:** Tailwind CSS 4 plus project-owned CSS and React components. The authenticated `AppShell` provides the InsightFS sidebar, top bar, role-aware navigation, and responsive mobile behavior. The repository does not currently include shadcn/Radix, a graph library, or a notification package, so Phase 3 will reuse the existing visual language and implement focused accessible components without adding a large dependency.
 - **Application database:** MySQL through Drizzle ORM. Schema declarations live in `lib/db/schema.ts`; ordered SQL migrations live in `drizzle/` and are applied by `scripts/migrate.ts` with a `schema_migrations` ledger.
 - **Authentication:** Server-side, cookie-backed sessions in `lib/auth/session.ts`. Protected layouts redirect unauthenticated users and users who must change their password.
 - **Authorization:** Static role permissions in `lib/auth/permissions.ts`, combined with data-source-scoped grants in `data_source_access` and `requireDataSourceAccess`. Phase 3 will extend these mechanisms rather than introduce a second RBAC system.
@@ -89,7 +89,7 @@ Routes will use the existing JSON/error convention, validate all inputs, prevent
 - Three-panel review workspace — object explorer, main editor, and contextual AI/validation panel with responsive fallback.
 - Shared Phase 3 status badges, loading/empty/error states, drawers/dialogs, formula viewer/builder, search, lineage, and version comparison components.
 
-The IFS Insight sidebar will gain **Business Context** and **KPI Catalogue** entries with role-aware visibility. The stale dashboard phase label will be corrected so Phase 3 is represented by the new modules.
+The InsightFS sidebar will gain **Business Context** and **KPI Catalogue** entries with role-aware visibility. The stale dashboard phase label will be corrected so Phase 3 is represented by the new modules.
 
 ## Core services
 
