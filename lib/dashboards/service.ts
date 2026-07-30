@@ -7,9 +7,10 @@ import { hasPermission } from "@/lib/auth/permissions";
 import { HttpError } from "@/lib/http";
 import { mayViewDashboardSql, requireDashboardAccess, requireDashboardDataSource, requireDashboardRole } from "./permissions";
 import { canTransitionDashboard, defaultVisualization, validateVisualization, type DashboardFinding } from "./rules";
-import { generateBlockQuery } from "./query";
+import { generateBlockQuery, previewDashboardBlock } from "./query";
 import { parseSmartFilterConfiguration, recommendFilterConfiguration } from "./filter-controls";
 import { datasetShapes, evaluateDashboardQuality, generatedDashboardBlockTypes, validateBlockRequirement, type DatasetShape, type DatasetValidationResult, type GeneratedDashboardBlockType } from "./planning";
+import { deriveOrderedStages } from "./chart-series";
 import type { z } from "zod";
 import type { blockCreateSchema, dashboardCreateSchema, dashboardUpdateSchema, globalFilterSchema, workflowActionSchema } from "./validation";
 
@@ -83,6 +84,19 @@ export async function addDashboardBlock(dashboardId: string, input: BlockInput, 
 export async function updateDashboardBlock(dashboardId: string, blockId: string, input: Partial<BlockInput> & { expectedRevision: number }, user: AuthenticatedUser) {
   const dashboard = await requireDashboardAccess(user, dashboardId, "EDIT"); if (!dashboard.currentDraftVersionId) throw new HttpError(409, "Published dashboards are immutable", "IMMUTABLE_VERSION"); const version = (await db.select().from(dashboardVersions).where(eq(dashboardVersions.id, dashboard.currentDraftVersionId)).limit(1))[0]; if (!version || version.revision !== input.expectedRevision) throw new HttpError(409, "This draft changed in another session", "STALE_VERSION"); const block = (await db.select().from(dashboardBlocks).where(and(eq(dashboardBlocks.id, blockId), eq(dashboardBlocks.dashboardVersionId, version.id))).limit(1))[0]; if (!block) throw new HttpError(404, "Block not found", "NOT_FOUND"); let kpiVersion = block.kpiVersion; if (input.kpiId) { const kpi = (await db.select().from(kpiDefinitions).where(and(eq(kpiDefinitions.id, input.kpiId), eq(kpiDefinitions.modelId, version.businessContextModelId), inArray(kpiDefinitions.status, ["APPROVED", "CERTIFIED"]))).limit(1))[0]; if (!kpi) throw new HttpError(400, "KPI is not compatible", "KPI_NOT_ALLOWED"); kpiVersion = kpi.version; }
   const now = new Date(); await db.transaction(async (tx) => { await tx.update(dashboardBlocks).set({ blockType: input.blockType, title: input.title, description: input.description, businessQuestion: input.businessQuestion, intendedAudience: input.intendedAudience, decisionSupported: input.decisionSupported, kpiId: input.kpiId, kpiVersion, dimensionFieldId: input.dimensionFieldId, visualizationType: input.visualizationType, filtersJson: input.filters ? JSON.stringify(input.filters) : undefined, visualizationConfigJson: input.visualizationConfig ? JSON.stringify(input.visualizationConfig) : undefined, formattingConfigJson: input.formattingConfig ? JSON.stringify(input.formattingConfig) : undefined, positionJson: input.position ? JSON.stringify(input.position) : undefined, isHidden: input.isHidden, isLocked: input.isLocked, validationStatus: "NOT_VALIDATED", previewStatus: "NOT_RUN", updatedBy: user.id, updatedAt: now }).where(eq(dashboardBlocks.id, block.id)); await tx.update(dashboardVersions).set({ revision: version.revision + 1, updatedBy: user.id, updatedAt: now }).where(and(eq(dashboardVersions.id, version.id), eq(dashboardVersions.revision, input.expectedRevision))); }); return { revision: version.revision + 1 };
+}
+
+export async function reorderDashboardBlocks(dashboardId: string, sourceBlockId: string, targetBlockId: string, expectedRevision: number, user: AuthenticatedUser) {
+  const dashboard = await requireDashboardAccess(user, dashboardId, "EDIT"); if (!dashboard.currentDraftVersionId) throw new HttpError(409, "Published dashboards are immutable", "IMMUTABLE_VERSION");
+  const version = (await db.select().from(dashboardVersions).where(eq(dashboardVersions.id, dashboard.currentDraftVersionId)).limit(1))[0]; if (!version || !draftStatuses.has(version.status)) throw new HttpError(409, "Dashboard version is immutable", "IMMUTABLE_VERSION"); if (version.revision !== expectedRevision) throw new HttpError(409, "This draft changed in another session", "STALE_VERSION");
+  const blocks = await db.select().from(dashboardBlocks).where(and(eq(dashboardBlocks.dashboardVersionId, version.id), inArray(dashboardBlocks.id, [sourceBlockId, targetBlockId]))); const source = blocks.find(block => block.id === sourceBlockId); const target = blocks.find(block => block.id === targetBlockId); if (!source || !target) throw new HttpError(404, "Block not found", "NOT_FOUND");
+  const fallback = { x: 0, y: 0, w: 6, h: 4 }; const sourcePosition = (() => { try { return JSON.parse(source.positionJson) as typeof fallback; } catch { return fallback; } })(); const targetPosition = (() => { try { return JSON.parse(target.positionJson) as typeof fallback; } catch { return fallback; } })(); const now = new Date();
+  await db.transaction(async tx => {
+    await tx.update(dashboardBlocks).set({ positionJson: JSON.stringify({ ...sourcePosition, x: targetPosition.x, y: targetPosition.y }), sortOrder: target.sortOrder, updatedBy: user.id, updatedAt: now }).where(eq(dashboardBlocks.id, source.id));
+    await tx.update(dashboardBlocks).set({ positionJson: JSON.stringify({ ...targetPosition, x: sourcePosition.x, y: sourcePosition.y }), sortOrder: source.sortOrder, updatedBy: user.id, updatedAt: now }).where(eq(dashboardBlocks.id, target.id));
+    await tx.update(dashboardVersions).set({ revision: version.revision + 1, updatedBy: user.id, updatedAt: now }).where(and(eq(dashboardVersions.id, version.id), eq(dashboardVersions.revision, expectedRevision)));
+  });
+  return { revision: version.revision + 1, sourceBlockId, targetBlockId };
 }
 
 export async function removeDashboardBlock(dashboardId: string, blockId: string, user: AuthenticatedUser) { const dashboard = await requireDashboardAccess(user, dashboardId, "EDIT"); if (!dashboard.currentDraftVersionId) throw new HttpError(409, "Published dashboards are immutable", "IMMUTABLE_VERSION"); const version = (await db.select().from(dashboardVersions).where(eq(dashboardVersions.id, dashboard.currentDraftVersionId)).limit(1))[0]; const block = (await db.select().from(dashboardBlocks).where(and(eq(dashboardBlocks.id, blockId), eq(dashboardBlocks.dashboardVersionId, dashboard.currentDraftVersionId))).limit(1))[0]; if (!block) throw new HttpError(404, "Block not found", "NOT_FOUND"); const now = new Date(); await db.transaction(async (tx) => { await tx.delete(dashboardBlocks).where(eq(dashboardBlocks.id, blockId)); await tx.update(dashboardVersions).set({ revision: version.revision + 1, updatedAt: now, updatedBy: user.id }).where(eq(dashboardVersions.id, version.id)); }); }
@@ -199,4 +213,44 @@ export async function createDashboardVersion(dashboardId: string, user: Authenti
     await tx.update(dashboards).set({currentDraftVersionId:id,status:"DRAFT",updatedAt:now,updatedBy:user.id}).where(eq(dashboards.id,dashboardId));
   });
   return{versionId:id,versionNumber:source.versionNumber+1};
+}
+
+export async function addRecommendedCategoricalCharts(dashboardId: string, user: AuthenticatedUser) {
+  let dashboard = await requireDashboardAccess(user, dashboardId, "EDIT").catch(async () => requireDashboardAccess(user, dashboardId, "PUBLISH"));
+  if (!dashboard.currentPublishedVersionId) throw new HttpError(409, "A published dashboard version is required", "VERSION_NOT_FOUND");
+  const publishedBlocks = await db.select().from(dashboardBlocks).where(eq(dashboardBlocks.dashboardVersionId, dashboard.currentPublishedVersionId));
+  const candidates = publishedBlocks.flatMap((block) => {
+    if (!block.kpiId || !block.dimensionFieldId || block.blockType !== "DISTRIBUTION_CHART") return [];
+    try { const preview = JSON.parse(block.previewJson || "{}") as { rows?: Array<Record<string, unknown>> }; return preview.rows && preview.rows.length >= 3 ? [{ block, rows: preview.rows }] : []; } catch { return []; }
+  });
+  const fields = candidates.length ? await db.select().from(businessFields).where(inArray(businessFields.id, candidates.map((item) => item.block.dimensionFieldId!))) : [];
+  const fieldMap = new Map(fields.map((field) => [field.id, field]));
+  const source = candidates.sort((left, right) => {
+    const score = (candidate: typeof left) => { const field = fieldMap.get(candidate.block.dimensionFieldId!); return (field?.fieldRole === "STATUS_DIMENSION" || field?.businessType === "STATUS" ? 10 : 0) + Math.max(0, 10 - candidate.rows.length); };
+    return score(right) - score(left);
+  })[0];
+  if (!source) throw new HttpError(409, "No validated categorical dataset is available for pie and funnel charts", "CATEGORICAL_DATASET_UNAVAILABLE");
+  const orderedStages = deriveOrderedStages(source.rows);
+  if (orderedStages.length < 3) throw new HttpError(409, "At least three data-backed stages are required for a funnel", "FUNNEL_STAGES_UNAVAILABLE");
+  if (!dashboard.currentDraftVersionId) { await createDashboardVersion(dashboardId, user); dashboard = await requireDashboardAccess(user, dashboardId, "EDIT"); }
+  const draftVersionId = dashboard.currentDraftVersionId!;
+  const draftBlocks = await db.select().from(dashboardBlocks).where(eq(dashboardBlocks.dashboardVersionId, draftVersionId));
+  const draftSource = draftBlocks.find((block) => block.title === source.block.title && block.kpiId === source.block.kpiId && block.dimensionFieldId === source.block.dimensionFieldId);
+  const highestRow = draftBlocks.reduce((maximum, block) => { try { const position = JSON.parse(block.positionJson) as { y?: number; h?: number }; return Math.max(maximum, (position.y ?? 0) + (position.h ?? 0)); } catch { return maximum; } }, 0);
+  const sourceConfig = (() => { try { return JSON.parse(source.block.visualizationConfigJson || "{}") as Record<string, unknown>; } catch { return {}; } })();
+  const shared = { kpiId: source.block.kpiId!, dimensionFieldId: source.block.dimensionFieldId!, filters: [], formattingConfig: { decimalPlaces: 2, emptyValue: "No data matches the current filters." }, isHidden: false, isLocked: false };
+  const createdIds: string[] = [];
+  try {
+    const pie = await addDashboardBlock(dashboardId, { ...shared, blockType: "DISTRIBUTION_CHART", title: `${source.block.title} — Share`, description: "Shows the proportional share of the validated categorical result, grouping smaller categories into Other at render time.", businessQuestion: source.block.businessQuestion || undefined, intendedAudience: source.block.intendedAudience || undefined, decisionSupported: source.block.decisionSupported || undefined, visualizationType: "PIE", visualizationConfig: { ...sourceConfig, datasetShape: "CATEGORY_DISTRIBUTION", categoryLimit: 6, dimensionFieldIds: [source.block.dimensionFieldId] }, position: { x: 0, y: highestRow, w: 6, h: 4 } }, user); createdIds.push(pie.id);
+    const funnel = await addDashboardBlock(dashboardId, { ...shared, blockType: "FUNNEL", title: `${source.block.title} — Stage Funnel`, description: "Shows the validated status result as data-backed ordered stages with stage-to-stage conversion.", businessQuestion: source.block.businessQuestion || undefined, intendedAudience: source.block.intendedAudience || undefined, decisionSupported: source.block.decisionSupported || undefined, visualizationType: "FUNNEL", visualizationConfig: { ...sourceConfig, datasetShape: "STAGE_FUNNEL", categoryLimit: 8, dimensionFieldIds: [source.block.dimensionFieldId], orderedStages }, position: { x: 6, y: highestRow, w: 6, h: 4 } }, user); createdIds.push(funnel.id);
+    for (const blockId of createdIds) await previewDashboardBlock(dashboardId, blockId, user);
+    if (draftSource) {
+      const filters = await db.select().from(dashboardGlobalFilters).where(eq(dashboardGlobalFilters.dashboardVersionId, draftVersionId));
+      for (const filter of filters) { try { const appliesTo = JSON.parse(filter.appliesToBlockIdsJson || "[]") as string[]; if (appliesTo.includes(draftSource.id)) await db.update(dashboardGlobalFilters).set({ appliesToBlockIdsJson: JSON.stringify([...new Set([...appliesTo, ...createdIds])]), updatedAt: new Date(), updatedBy: user.id }).where(eq(dashboardGlobalFilters.id, filter.id)); } catch { /* Preserve malformed legacy filter configuration for manual review. */ } }
+    }
+    return { versionId: draftVersionId, sourceBlockId: source.block.id, pieBlockId: createdIds[0], funnelBlockId: createdIds[1], orderedStages };
+  } catch (error) {
+    for (const blockId of createdIds) await removeDashboardBlock(dashboardId, blockId, user).catch(() => undefined);
+    throw error;
+  }
 }

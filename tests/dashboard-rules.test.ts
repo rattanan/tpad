@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { assertSafeDashboardSql, canTransitionDashboard, defaultVisualization, validateVisualization } from "../lib/dashboards/rules";
 import { dashboardRecommendationSchema } from "../lib/dashboards/ai-schema";
-import { blockCreateSchema, dashboardCreateSchema, queryPlanSchema } from "../lib/dashboards/validation";
+import { blockCreateSchema, blockReorderSchema, dashboardCreateSchema, queryPlanSchema } from "../lib/dashboards/validation";
 import { hasPermission } from "../lib/auth/permissions";
 
 const id = "11111111-1111-4111-8111-111111111111";
+const secondId = "22222222-2222-4222-8222-222222222222";
 describe("Phase 4 dashboard governance", () => {
   it("maps existing roles to builder, reviewer, publisher, and viewer capabilities", () => {
     expect(hasPermission("DASHBOARD_CREATOR", "EDIT_DASHBOARD")).toBe(true);
@@ -34,6 +35,10 @@ describe("Phase 4 dashboard governance", () => {
   it("validates structured dashboard creation and block inputs", () => {
     expect(dashboardCreateSchema.safeParse({ name: "Fleet Readiness", category: "Operations", businessObjective: "Monitor fleet readiness safely", targetAudience: "Operations", businessQuestions: ["How many aircraft are serviceable?"], refreshExpectation: "Hourly", defaultDateRange: "Last 30 days", tags: [], businessContextModelId: id, businessContextVersionId: id, layoutTemplateId: id }).success).toBe(true);
     expect(blockCreateSchema.safeParse({ blockType: "KPI_CARD", title: "Readiness", visualizationType: "NUMBER", filters: [], visualizationConfig: {}, formattingConfig: {}, position: { x: 0, y: 0, w: 3, h: 2 }, isHidden: false, isLocked: false, kpiId: id }).success).toBe(true);
+  });
+  it("requires two distinct blocks and a revision for layout reordering", () => {
+    expect(blockReorderSchema.safeParse({ sourceBlockId: id, targetBlockId: secondId, expectedRevision: 2 }).success).toBe(true);
+    expect(blockReorderSchema.safeParse({ sourceBlockId: id, targetBlockId: id, expectedRevision: 2 }).success).toBe(false);
   });
   it("validates semantic query plans and bounded preview limits", () => {
     const plan = { businessContextVersionId: id, dataSourceId: id, measure: { kpiId: id, kpiVersion: 1 }, dimensions: [], filters: [], sort: [], limit: 100, relationshipPathIds: [] };

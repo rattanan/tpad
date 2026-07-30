@@ -7,6 +7,7 @@ import {formatKpiValue} from "@/lib/dashboards/kpi-value-format";
 import {createYAxisScale} from "@/lib/dashboards/chart-scale";
 import {formatChartLabel} from "@/lib/dashboards/chart-label";
 import {buildDynamicInsight} from "@/lib/dashboards/dynamic-insight";
+import {FunnelChart,PieChart} from "./categorical-charts";
 
 const DashboardCopilot=dynamic(()=>import("./dashboard-copilot"),{ssr:false,loading:()=> <div className="copilot-loading"><span className="insight-spinner"/>Opening AI Copilot…</div>});
 type Block={id:string;title:string;description:string|null;businessQuestion:string|null;decisionSupported:string|null;blockType:string;visualizationType:string;position:{x:number;y:number;w:number;h:number};visualizationConfig?:Record<string,unknown>;preview:{rows?:Record<string,unknown>[]} | null};
@@ -49,6 +50,7 @@ function ViewerWidget({block,result,allBlocks,allResults,onRetry}:{block:Block;r
   const width=Math.min(12,Math.max(3,block.position.w||6));
   const tableWidget=block.visualizationType.includes("TABLE")||block.blockType.includes("TABLE")||block.blockType==="EXCEPTION_LIST";
   const axisChart=["LINE","AREA","BAR","STACKED_BAR"].includes(block.visualizationType);
+  const orderedStages=Array.isArray(block.visualizationConfig?.orderedStages)?block.visualizationConfig.orderedStages.filter((item):item is string=>typeof item==="string"):[];
   const emptyMessage=block.blockType==="EXCEPTION_LIST"?"No exception records match the current filters.":block.blockType==="TREND_CHART"?"Not enough historical data to display a trend.":"No data matches the current filters.";
   const kpiValue=formatKpiValue(values[0]?.value);
 
@@ -66,6 +68,10 @@ function ViewerWidget({block,result,allBlocks,allResults,onRetry}:{block:Block;r
           ?<div className="viewer-progress"><strong>{values[0]?.value.toLocaleString()}</strong><i><b style={{width:`${Math.min(100,Math.max(0,values[0]?.value||0))}%`}}/></i><span>Compared with the governed target</span></div>
           :tableWidget
             ?<FittedViewerTable rows={rows}/>
+            :["PIE","DONUT"].includes(block.visualizationType)
+              ?<PieChart values={values} title={block.title}/>
+              :block.visualizationType==="FUNNEL"
+                ?<FunnelChart values={values} title={block.title} orderedStages={orderedStages}/>
             :axisChart
               ?<AxisChart values={values} type={block.visualizationType} title={block.title}/>
               :<ValueBarList values={values}/>)}
